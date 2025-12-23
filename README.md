@@ -62,11 +62,6 @@ cmake ..
 make
 ```
 
-Or use the provided build script:
-```bash
-./build.sh
-```
-
 ## Usage Example
 
 ```c
