@@ -29,7 +29,7 @@ ctorch is a minimal deep learning library written in C that implements core neur
 - [ ] ELU
 
 #### Loss Functions
-- [ ] **Cross Entropy** (declared, not implemented)
+- [x] **Cross Entropy** (declared, not implemented)
 - [ ] Mean Squared Error (MSE)
 - [ ] Mean Absolute Error (MAE)
 - [ ] Binary Cross Entropy
