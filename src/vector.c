@@ -34,13 +34,13 @@ void vector_free_tmp(Vector *v) {
   free(v);
 }
 
-void vector_append_tmp(Vector *dest, const double *row_data) {
+void vector_append_tmp(Vector *dest, const float *row_data) {
   if (!dest || !row_data)
     return;
 
   if ((size_t)dest->rows == dest->capacity) {
     size_t new_cap = dest->capacity ? dest->capacity * 2 : 4;
-    double *tmp = realloc(dest->data, new_cap * dest->cols * sizeof *tmp);
+    float *tmp = realloc(dest->data, new_cap * dest->cols * sizeof *tmp);
     if (!tmp) {
       fprintf(stderr, "Buy more ram LOL\n");
       exit(1);
@@ -85,7 +85,7 @@ void vector_print(Vector *src, int count, bool suffle) {
       int ii = suffle ? random_to(src->rows) : i;
       int jj = suffle ? random_to(src->cols) : j;
 
-      double val = vector_get(src, ii, jj);
+      float val = vector_get(src, ii, jj);
       if (j == src->cols - 1)
         printf("%f", val);
       else
@@ -107,14 +107,14 @@ void vector_free(VectorContext *ctx) {
   free(ctx);
 }
 
-void vector_append(VectorContext *ctx, Vector *dest, const double *row_data) {
+void vector_append(VectorContext *ctx, Vector *dest, const float *row_data) {
   if (!dest || !row_data)
     return;
 
   if ((size_t)dest->rows == dest->capacity) {
     size_t new_cap = dest->capacity ? dest->capacity * 2 : 4;
-    double *tmp = arena_alloc(ctx->arena, new_cap * dest->cols * sizeof *tmp,
-                              ARENA_ALIGNOF(double));
+    float *tmp = arena_alloc(ctx->arena, new_cap * dest->cols * sizeof *tmp,
+                              ARENA_ALIGNOF(float));
     if (!tmp) {
       fprintf(stderr, "Buy more ram LOL\n");
       exit(1);
@@ -129,7 +129,7 @@ void vector_append(VectorContext *ctx, Vector *dest, const double *row_data) {
 }
 
 void vector_append_all(VectorContext *ctx, Vector *dest,
-                       const double **row_data, size_t size) {
+                       const float **row_data, size_t size) {
   if (!dest || !row_data)
     return;
 
@@ -138,7 +138,7 @@ void vector_append_all(VectorContext *ctx, Vector *dest,
   }
 }
 
-double vector_get(const Vector *src, size_t row, size_t col) {
+float vector_get(const Vector *src, size_t row, size_t col) {
   return src->data[row * src->cols + col];
 }
 
@@ -151,7 +151,7 @@ void vector_transpose(Vector *src) {
     return;
 
   for (size_t i = 0; i < src->cols; i++) {
-    double rows[src->rows];
+    float rows[src->rows];
     memset(rows, 0, sizeof(rows));
 
     for (size_t j = 0; j < src->rows; j++) {
@@ -177,7 +177,7 @@ Vector *vector_randn(VectorContext *ctx, size_t rows, size_t cols) {
     return NULL;
 
   for (size_t i = 0; i < rows; i++) {
-    double tmp[cols];
+    float tmp[cols];
     memset(tmp, 0, sizeof(tmp));
 
     for (size_t j = 0; j < cols; j++) {
@@ -198,7 +198,7 @@ Vector *vector_get_column(VectorContext *ctx, Vector *src, size_t col) {
     return NULL;
 
   for (size_t i = 0; i < src->rows; i++) {
-    double tmp[1] = {vector_get(src, i, col)};
+    float tmp[1] = {vector_get(src, i, col)};
     vector_append(ctx, v, tmp);
   }
 
@@ -214,7 +214,7 @@ Vector *vector_remove_column(VectorContext *ctx, Vector *src, size_t col) {
     return NULL;
 
   for (size_t i = 0; i < src->rows; i++) {
-    double tmp[src->cols - 1];
+    float tmp[src->cols - 1];
     memset(tmp, 0, sizeof(tmp));
 
     size_t dest_idx = 0;

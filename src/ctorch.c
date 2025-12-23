@@ -5,7 +5,7 @@
 #include <string.h>
 
 Vector *affine_transform(VectorContext *ctx, Vector *inputs, Vector *weights,
-                         double *bias) {
+                         float *bias) {
   if (inputs->cols != weights->rows) {
     if (inputs->cols == weights->cols) {
       vector_transpose(weights);
@@ -21,13 +21,13 @@ Vector *affine_transform(VectorContext *ctx, Vector *inputs, Vector *weights,
     return NULL;
 
   for (size_t i = 0; i < inputs->rows; i++) {
-    double dot[weights->cols];
+    float dot[weights->cols];
     memset(dot, 0, sizeof(dot));
 
     for (size_t k = 0; k < weights->cols; k++) {
       for (size_t j = 0; j < inputs->cols; j++) {
-        double input = vector_get(inputs, i, j);
-        double weight = vector_get(weights, j, k);
+        float input = vector_get(inputs, i, j);
+        float weight = vector_get(weights, j, k);
         dot[k] += input * weight;
       }
       dot[k] += bias[k];
@@ -46,11 +46,11 @@ int activation_ReLU(Vector *inputs) {
     return -1;
 
   for (size_t i = 0; i < inputs->rows; i++) {
-    double dot[inputs->cols];
+    float dot[inputs->cols];
     memset(dot, 0, sizeof(dot));
 
     for (size_t j = 0; j < inputs->cols; j++) {
-      double input = vector_get(inputs, i, j);
+      float input = vector_get(inputs, i, j);
       dot[j] = input > 0 ? input : 0;
     }
     vector_append_tmp(tmp, dot);
@@ -74,11 +74,11 @@ int activation_sigmoid(Vector *inputs) {
     return -1;
 
   for (size_t i = 0; i < inputs->rows; i++) {
-    double dot[inputs->cols];
+    float dot[inputs->cols];
     memset(dot, 0, sizeof(dot));
 
     for (size_t j = 0; j < inputs->cols; j++) {
-      double input = vector_get(inputs, i, j);
+      float input = vector_get(inputs, i, j);
       dot[j] = 1 / (1 + expf(-input));
     }
     vector_append_tmp(tmp, dot);
@@ -103,18 +103,18 @@ int activation_softmax(Vector *inputs) {
     return -1;
 
   for (size_t i = 0; i < inputs->rows; i++) {
-    double sum = 0;
+    float sum = 0;
 
-    double dot[inputs->cols];
+    float dot[inputs->cols];
     memset(dot, 0, sizeof(dot));
 
     for (size_t j = 0; j < inputs->cols; j++) {
-      double input = vector_get(inputs, i, j);
+      float input = vector_get(inputs, i, j);
       sum += expf(input);
     }
 
     for (size_t j = 0; j < inputs->cols; j++) {
-      double input = vector_get(inputs, i, j);
+      float input = vector_get(inputs, i, j);
       dot[j] = expf(input) / sum;
     }
     vector_append_tmp(tmp, dot);
@@ -130,6 +130,52 @@ int activation_softmax(Vector *inputs) {
   return 0;
 }
 
-double cross_entropy(Vector *logits, Vector *labels) {
-  // TODO: Not yet implemented
+float cross_entropy_lg(Vector *logits, Vector *labels) {
+  if (!logits || !labels)
+    return -1;
+
+  float total_loss = 0.0f;
+  for (size_t i = 0; i < logits->rows; i++) {
+
+    float max = vector_get(logits, i, 0);
+    for (size_t j = 0; j < logits->cols; j++) {
+      float val = vector_get(logits, i, j);
+      if (val > max)
+        max = val;
+    }
+
+    float sum = 0.0f;
+    for (size_t j = 0; j < logits->cols; j++) {
+      float val = vector_get(logits, i, j);
+      sum += expf(val - max);
+    }
+
+    float log_sum_exp = logf(sum) + max;
+
+    size_t true_class = (size_t)labels->data[i];
+    float y = vector_get(logits, i, true_class);
+    total_loss += log_sum_exp - y;
+  }
+
+  return total_loss / logits->rows;
+}
+
+#define EPSILON 1e-7f
+
+float cross_entropy(Vector *logits, Vector *labels) {
+  if (!logits || !labels)
+    return -1;
+
+  float loss = 0.0f;
+
+  for (size_t i = 0; i < logits->rows; i++) {
+    size_t true_class = (size_t)labels->data[i];
+    float val = vector_get(logits, i, true_class);
+    if (val < EPSILON)
+      val = EPSILON;
+
+    loss -= logf(val);
+  }
+
+  return loss / logits->rows;
 }

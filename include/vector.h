@@ -17,7 +17,7 @@ typedef struct {
   size_t rows;      /** Number of rows in the matrix */
   size_t cols;      /** Number of columns in the matrix */
   size_t capacity;  /** Allocated capacity for growth */
-  double *data;     /** Contiguous array storing matrix data in row-major order */
+  float *data;      /** Contiguous array storing matrix data in row-major order */
 } Vector;
 
 /**
@@ -101,9 +101,9 @@ void vector_free_tmp(Vector *v);
  *
  * @param ctx Memory context for allocation
  * @param dest Vector to append to
- * @param row_data Array of doubles with length equal to vector's column count
+ * @param row_data Array of floats with length equal to vector's column count
  */
-void vector_append(VectorContext *ctx, Vector *dest, const double *row_data);
+void vector_append(VectorContext *ctx, Vector *dest, const float *row_data);
 
 /**
  * @brief Appends a row to a temporary vector.
@@ -112,9 +112,9 @@ void vector_append(VectorContext *ctx, Vector *dest, const double *row_data);
  * Uses standard realloc for memory management.
  *
  * @param dest Temporary vector to append to
- * @param row_data Array of doubles with length equal to vector's column count
+ * @param row_data Array of floats with length equal to vector's column count
  */
-void vector_append_tmp(Vector *dest, const double *row_data);
+void vector_append_tmp(Vector *dest, const float *row_data);
 
 /**
  * @brief Appends multiple rows to the vector.
@@ -123,11 +123,11 @@ void vector_append_tmp(Vector *dest, const double *row_data);
  *
  * @param ctx Memory context for allocation
  * @param dest Vector to append to
- * @param row_data Array of row pointers, each pointing to an array of doubles
+ * @param row_data Array of row pointers, each pointing to an array of floats
  * @param size Number of rows to append
  */
 void vector_append_all(VectorContext *ctx, Vector *dest,
-                       const double **row_data, size_t size);
+                       const float **row_data, size_t size);
 
 /**
  * @brief Gets element at specified row and column.
@@ -142,7 +142,7 @@ void vector_append_all(VectorContext *ctx, Vector *dest,
  * @param col Column index (0-based)
  * @return Value at the specified position
  */
-double vector_get(const Vector *src, size_t row, size_t col);
+float vector_get(const Vector *src, size_t row, size_t col);
 
 /**
  * @brief Creates a vector filled with random normal values.

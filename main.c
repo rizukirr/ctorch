@@ -17,17 +17,17 @@ Vector *spiral_data(VectorContext *ctx, size_t n, size_t classes) {
   for (size_t j = 0; j < classes; j++) {
     for (size_t i = 0; i < n; i++) {
       /* r = linspace(0, 1, N) */
-      double r = (double)i / (double)(n - 1);
+      float r = (float)i / (float)(n - 1);
 
       /* t = linspace(0, 2.5*2π, N) + (2π * j / classes) + noise */
-      double angle_per_class = (2.0 * M_PI) / (double)classes;
-      double t = (2.5 * 2.0 * M_PI * i) / (double)(n - 1) +
-                 angle_per_class * j + randn() * 0.2;
+      float angle_per_class = (2.0f * M_PI) / (float)classes;
+      float t = (2.5f * 2.0f * M_PI * i) / (float)(n - 1) +
+                angle_per_class * j + randn() * 0.2f;
 
-      double xs = r * sin(t);
-      double xc = r * cos(t);
-      double class = (double)j;
-      double data[3] = {xs, xc, class};
+      float xs = r * sinf(t);
+      float xc = r * cosf(t);
+      float class = (float)j;
+      float data[3] = {xs, xc, class};
 
       vector_append(ctx, X, data);
     }
@@ -42,7 +42,7 @@ int main(void) {
   VectorContext *ctx = vector_create();
   Vector *inputs = spiral_data(ctx, 100, 3);
   Vector *weights = vector_randn(ctx, 4, 2);
-  double bias[4];
+  float bias[4];
   for (size_t i = 0; i < len(bias); i++) {
     bias[i] = randn();
   }
@@ -52,14 +52,23 @@ int main(void) {
     return 1;
   }
 
-  // Vector *y = vector_get_column(ctx, inputs, 2);
+  Vector *y = vector_get_column(ctx, inputs, 2);
   Vector *x = vector_remove_column(ctx, inputs, 2);
 
   Vector *logits = affine_transform(ctx, x, weights, bias);
+  float loss = cross_entropy_lg(logits, y);
+
+  printf("loss: %f\n", loss);
+  printf("\n");
+
   if (activation_softmax(logits) < 0) {
     vector_free(ctx);
     return 1;
   }
+
+  float ls = cross_entropy(logits, y);
+  printf("loss: %f\n", ls);
+  printf("\n");
 
   vecpr(logits);
 

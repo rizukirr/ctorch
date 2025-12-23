@@ -73,3 +73,4 @@ core
 vgcore.*
 build.sh
 run.sh
+CLAUDE.md

@@ -7,7 +7,8 @@
  * @brief Applies affine transformation (linear layer) to input data.
  *
  * Computes the linear transformation: output = inputs * weights + bias
- * This is the fundamental operation for fully connected (dense) neural network layers.
+ * This is the fundamental operation for fully connected (dense) neural network
+ * layers.
  *
  * Math formula: Y = XW + b
  * where:
@@ -18,18 +19,20 @@
  *
  * @param ctx Memory context for allocation
  * @param inputs Input matrix of shape (N, D_in) where N is batch size
- * @param weights Weight matrix of shape (D_in, D_out) or will be transposed if needed
+ * @param weights Weight matrix of shape (D_in, D_out) or will be transposed if
+ * needed
  * @param bias Bias array of length D_out
  * @return Pointer to output vector of shape (N, D_out), or NULL on error
  */
 Vector *affine_transform(VectorContext *ctx, Vector *inputs, Vector *weights,
-                         double *bias);
+                         float *bias);
 
 /**
  * @brief Applies ReLU (Rectified Linear Unit) activation function in-place.
  *
  * ReLU is defined as: f(x) = max(0, x)
- * It replaces all negative values with zero while keeping positive values unchanged.
+ * It replaces all negative values with zero while keeping positive values
+ * unchanged.
  *
  * Math formula: f(x) = { x  if x > 0
  *                      { 0  if x ≤ 0
@@ -67,22 +70,43 @@ int activation_sigmoid(Vector *inputs);
 int activation_softmax(Vector *inputs);
 
 /**
- * @brief Computes cross-entropy loss between predictions and labels.
+ * @brief Computes cross-entropy loss from raw logits (numerically stable).
  *
- * Cross-entropy measures the difference between two probability distributions.
- * Lower values indicate better predictions. Commonly used with softmax for
- * multi-class classification.
+ * Computes cross-entropy directly from raw logits using the log-sum-exp trick
+ * for numerical stability. This is the preferred method as it avoids potential
+ * numerical issues from computing softmax separately.
  *
- * Math formula: L = -Σ(y_i * log(p_i))
+ * Math formula: L = (1/N) Σᵢ [log(Σⱼ exp(zᵢⱼ)) - zᵢ[yᵢ]]
+ *              which equals: L = -(1/N) Σᵢ log(softmax(zᵢ)[yᵢ])
  * where:
- *   - y_i are the true labels (one-hot encoded)
- *   - p_i are the predicted probabilities
+ *   - zᵢⱼ are the raw logits (before softmax)
+ *   - yᵢ is the true class index for sample i
+ *   - N is the number of samples
  *
- * @param logits Predicted probability distribution (after softmax)
- * @param labels True labels (one-hot encoded or class indices)
- * @return Cross-entropy loss value
- * @note Currently not implemented
+ * @param logits Raw logit values (before softmax) of shape (N, num_classes)
+ * @param labels True class indices as a vector of length N
+ * @return Average cross-entropy loss across all samples, or -1 on error
+ * @note Uses log-sum-exp trick: log(Σ exp(z)) = max + log(Σ exp(z - max))
  */
-double cross_entropy(Vector *logits, Vector *labels);
+float cross_entropy_lg(Vector *logits, Vector *labels);
+
+/**
+ * @brief Computes cross-entropy loss from softmax probabilities.
+ *
+ * Computes cross-entropy from probability distributions (after softmax).
+ * Use this when you already have softmax probabilities computed.
+ * For better numerical stability, prefer cross_entropy_lg() on raw logits.
+ *
+ * Math formula: L = -(1/N) Σᵢ log(pᵢ[yᵢ])
+ * where:
+ *   - pᵢ[yᵢ] is the predicted probability for the true class yᵢ
+ *   - N is the number of samples
+ *
+ * @param logits Softmax probabilities of shape (N, num_classes)
+ * @param labels True class indices as a vector of length N
+ * @return Average cross-entropy loss across all samples, or -1 on error
+ * @note Clips probabilities to EPSILON (1e-7) to prevent log(0) = -inf
+ */
+float cross_entropy(Vector *logits, Vector *labels);
 
 #endif // CTORCH_H
