@@ -1,16 +1,18 @@
-#include "ctorch.h"
+#include "errors.h"
+#include "keras.h"
+#include "ops.h"
 #include "randn.h"
-#include "vector.h"
+#include "tensor.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
-#define vecpr(v) (vector_print((v), 10, true))
+#define vecpr(v) (tensor_print((v), 10, true))
 
-Vector *spiral_data(VectorContext *ctx, size_t n, size_t classes) {
-  Vector *X = vector_new(ctx, 3);
+Tensor *spiral_data(TensorContext *ctx, size_t n, size_t classes) {
+  Tensor *X = tensor_new(ctx, 3);
   if (!X)
     return NULL;
 
@@ -29,7 +31,7 @@ Vector *spiral_data(VectorContext *ctx, size_t n, size_t classes) {
       float class = (float)j;
       float data[3] = {xs, xc, class};
 
-      vector_append(ctx, X, data);
+      tensor_append(ctx, X, data);
     }
   }
 
@@ -39,39 +41,46 @@ Vector *spiral_data(VectorContext *ctx, size_t n, size_t classes) {
 int main(void) {
   srand(time(NULL));
 
-  VectorContext *ctx = vector_create();
-  Vector *inputs = spiral_data(ctx, 100, 3);
-  Vector *weights = vector_randn(ctx, 4, 2);
-  float bias[4];
-  for (size_t i = 0; i < len(bias); i++) {
-    bias[i] = randn();
-  }
+  TensorContext *ctx = tensor_create();
+  Tensor *inputs = spiral_data(ctx, 100, 3);
 
   if (!inputs) {
-    vector_free(ctx);
+    tensor_free(ctx);
     return 1;
   }
 
-  Vector *y = vector_get_column(ctx, inputs, 2);
-  Vector *x = vector_remove_column(ctx, inputs, 2);
+  Tensor *y = tensor_select(ctx, inputs, 2, AxisColum);
+  Tensor *x = tensor_drop(ctx, inputs, 2, AxisColum);
 
-  Vector *logits = affine_transform(ctx, x, weights, bias);
-  float loss = cross_entropy_lg(logits, y);
+  DenseContext *dense_ctx = dense_init(2);
 
-  printf("loss: %f\n", loss);
-  printf("\n");
+  Dense *l1 = dense_create(dense_ctx, 3);
+  Dense *l2 = dense_create(dense_ctx, 4);
+  Dense *l3 = dense_create(dense_ctx, 4);
+  Dense *l4 = dense_create(dense_ctx, 4);
+  Dense *l5 = dense_create(dense_ctx, 3);
 
-  if (activation_softmax(logits) < 0) {
-    vector_free(ctx);
+  Tensor *yh1 = dense_forward(dense_ctx, l1, x, ReLU);
+  Tensor *yh2 = dense_forward(dense_ctx, l2, yh1, ReLU);
+  Tensor *yh3 = dense_forward(dense_ctx, l3, yh2, ReLU);
+  Tensor *yh4 = dense_forward(dense_ctx, l4, yh3, ReLU);
+  Tensor *yh5 = dense_forward(dense_ctx, l5, yh4, ReLU);
+
+  float loss = cross_entropy(yh5, y);
+  printf("Cross entropy loss: %f\n", loss);
+  if (isnan(loss)) {
+    char *error_msg = ctorch_get_error();
+    if (error_msg) {
+      printf("Error: %s\n", error_msg);
+    }
+    dense_free(dense_ctx);
+    tensor_free(ctx);
     return 1;
   }
 
-  float ls = cross_entropy(logits, y);
-  printf("loss: %f\n", ls);
-  printf("\n");
+  vecpr(yh5);
 
-  vecpr(logits);
-
-  vector_free(ctx);
+  dense_free(dense_ctx);
+  tensor_free(ctx);
   return 0;
 }

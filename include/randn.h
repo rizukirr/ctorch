@@ -16,24 +16,25 @@
 float randn(void);
 
 /**
- * @brief Generates a random integer in the specified range (inclusive).
+ * @brief Generates a random integer in the specified range.
  *
- * Returns a uniformly distributed random integer between min and max,
- * including both endpoints.
+ * Returns a uniformly distributed random integer between min (inclusive)
+ * and max (exclusive).
  *
  * @param min Minimum value (inclusive)
- * @param max Maximum value (inclusive)
- * @return Random integer in range [min, max]
+ * @param max Maximum value (exclusive)
+ * @return Random integer in range [min, max)
  */
 int random_between(int min, int max);
 
 /**
- * @brief Generates a random integer from 0 to max (inclusive).
+ * @brief Generates a random integer from 0 to max (exclusive).
  *
  * Convenience function equivalent to random_between(0, max).
+ * Returns values in the range [0, max).
  *
- * @param max Maximum value (inclusive)
- * @return Random integer in range [0, max]
+ * @param max Maximum value (exclusive)
+ * @return Random integer in range [0, max)
  */
 int random_to(int max);
 
