@@ -34,52 +34,68 @@ ctorch is a minimal deep learning library written in C that implements core neur
 - [ ] Mean Absolute Error (MAE)
 - [ ] Binary Cross Entropy
 
-### Training (TODO)
-- [ ] **Backpropagation** - Automatic gradient computation
-- [ ] **Optimizers**
-  - [ ] Stochastic Gradient Descent (SGD)
+### Training
+- [x] **Backpropagation** - Automatic gradient computation for all layers and activations
+- [x] **Optimizers**
+  - [x] Stochastic Gradient Descent (SGD)
   - [ ] Adam
   - [ ] RMSprop
   - [ ] Momentum
 - [ ] Learning rate schedulers
 - [ ] Gradient clipping
 
-### Advanced Features (TODO)
+### Advanced Features
 - [ ] Batch normalization
 - [ ] Dropout regularization
 - [ ] Convolution operations
 - [ ] Pooling layers (Max, Average)
 - [ ] Broadcasting operations
-- [ ] Element-wise operations
+- [x] **Element-wise operations** - Multiplication, subtraction
 - [ ] Model save/load (serialization)
 - [ ] GPU acceleration (CUDA/OpenCL)
 
 ## Build
 
+### Quick Build (Recommended)
+```bash
+# Debug build (with AddressSanitizer and debug symbols)
+./build.sh
+
+# Release build (optimized with -O3)
+./build.sh release
+
+# Build and run with timing
+./run.sh build
+```
+
+### Manual Build
 ```bash
 mkdir build && cd build
-cmake ..
+cmake -DCMAKE_BUILD_TYPE=Debug ..
 make
 ```
 
+The debug build includes AddressSanitizer (`-fsanitize=address`) for detecting memory errors.
+
 ## Usage Example
 
+### Low-Level API
 ```c
-#include "ctorch.h"
 #include "tensor.h"
+#include "ops.h"
 
 int main(void) {
-    // Create tensor context for memory management
-    TensorContext *ctx = tensor_create();
+    // Create tensor context for memory management (with gradient tracking)
+    TensorContext *ctx = tensor_create(true);
 
     // Create input data (100 samples x 2 features)
     Tensor *inputs = tensor_randn(ctx, 100, 2);
 
-    // Create weights (4 neurons x 2 input features)
-    Tensor *weights = tensor_randn(ctx, 4, 2);
+    // Create weights (2 input features x 4 neurons)
+    Tensor *weights = tensor_randn(ctx, 2, 4);
 
     // Create bias
-    double bias[4] = {0.0, 0.0, 0.0, 0.0};
+    float *bias = scalar_randn(ctx, 4);
 
     // Forward pass: affine transform
     Tensor *logits = affine_transform(ctx, inputs, weights, bias);
@@ -88,7 +104,7 @@ int main(void) {
     softmax(logits);
 
     // Print results
-    tensor_print(logits, 10, true);
+    tensor_print(logits, 10, false);
 
     // Cleanup
     tensor_free(ctx);
@@ -96,19 +112,68 @@ int main(void) {
 }
 ```
 
+### High-Level API (Keras-style)
+```c
+#include "keras.h"
+
+int main(void) {
+    // Initialize dense layer context
+    DenseContext *ctx = dense_init(2);  // 2 input features
+
+    // Create layers
+    Dense *layer1 = dense_create(ctx, 4);  // 4 neurons
+    Dense *layer2 = dense_create(ctx, 3);  // 3 output classes
+
+    // Create input
+    TensorContext *tensor_ctx = tensor_create(true);
+    Tensor *inputs = tensor_randn(tensor_ctx, 100, 2);
+
+    // Forward pass
+    Tensor *out1 = dense_forward(ctx, layer1, inputs, ReLU);
+    Tensor *out2 = dense_forward(ctx, layer2, out1, Softmax);
+
+    // Cleanup
+    dense_free(ctx);
+    tensor_free(tensor_ctx);
+    return 0;
+}
+```
+
 See `main.c` for a complete example with spiral dataset generation.
+
+## API Documentation
+
+All public functions include comprehensive docstrings in the header files:
+- `include/tensor.h` - Tensor creation, manipulation, and memory management
+- `include/ops.h` - Neural network operations (affine, activations, loss, backprop)
+- `include/keras.h` - High-level Keras-style API for building models
+- `include/arena.h` - Custom arena allocator for efficient memory management
+- `include/randn.h` - Random number generation utilities
 
 ## Current Limitations
 
-- No backpropagation (forward pass only)
-- No gradient computation or training
-- Limited to CPU operations
-- Basic matrix operations only
-- No model persistence
+- Limited to CPU operations (no GPU acceleration)
+- Basic optimizer (only SGD, no Adam/RMSprop)
+- No model persistence (serialization)
+- No convolutional or recurrent layers
+- No batch normalization or dropout
 
 ## Recent Updates
 
-### v0.2.0 - Major API Refactoring
+### v0.0.0-dev02 - Backpropagation & Training Support
+- **Implemented full backpropagation** - Gradient computation for all layers and activations
+- Added backward passes for:
+  - Affine transformation (linear layer)
+  - ReLU, Sigmoid, Tanh activations
+  - Combined Softmax + Cross-Entropy loss
+- **Implemented SGD optimizer** - Stochastic Gradient Descent with configurable learning rate
+- Added gradient tracking with `requires_grad` parameter in `tensor_create()`
+- Enhanced Dense layer API with `dense_backward()` and `dense_zero_grad()`
+- Added utility functions: `tensor_zeros()`, `tensor_subtract()`, `tensor_accuracy()`
+- **Documentation overhaul** - Added/fixed docstrings for all public API functions
+- Added `scalar_randn()` for 1D random array generation
+
+### v0.0.0-dev01 - Major API Refactoring
 - Renamed `Vector` to `Tensor` throughout codebase for better semantic clarity
 - Added comprehensive error handling system with `errors.h`
 - Implemented Keras-style high-level API (`keras.h`)
@@ -118,23 +183,30 @@ See `main.c` for a complete example with spiral dataset generation.
 - Fixed documentation mismatches and parameter typos
 - Updated all function signatures and examples to use new Tensor API
 
-### Breaking Changes
+### Breaking Changes (v0.0.0-dev01)
 - All `vector_*` functions renamed to `tensor_*`
 - `VectorContext` renamed to `TensorContext`
 - Activation functions simplified: `activation_ReLU()` to `relu()`, `activation_softmax()` to `softmax()`
 - Error handling: Functions now use global error context instead of return codes
 
+### Breaking Changes (v0.0.0-dev02)
+- `tensor_create()` now requires `bool requires_grad` parameter
+- Float precision used throughout (changed from `double` to `float`)
+
 ## Roadmap
 
-1. [DONE] Implement cross entropy loss function
-2. [DONE] Add tanh activation function
-3. Add backpropagation for gradient computation
-4. Implement SGD optimizer
-5. Add more activation functions (leaky ReLU, ELU)
-6. Build a complete training loop example
-7. Add convolutional layers
-8. Implement batch normalization and dropout
-9. Model serialization
+1. ✅ Implement cross entropy loss function
+2. ✅ Add tanh activation function
+3. ✅ Add backpropagation for gradient computation
+4. ✅ Implement SGD optimizer
+5. 🚧 Build a complete training loop example (in progress)
+6. Add more activation functions (leaky ReLU, ELU)
+7. Add more loss functions (MSE, MAE, Binary Cross Entropy)
+8. Implement advanced optimizers (Adam, RMSprop, Momentum)
+9. Add convolutional layers
+10. Implement batch normalization and dropout
+11. Model serialization (save/load weights)
+12. Performance optimization (SIMD, parallel computation)
 
 ## License
 

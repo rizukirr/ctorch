@@ -2,6 +2,7 @@
 #define RAND_IMPLEMENTATION
 #include "tensor.h"
 #include "arena.h"
+#include "errors.h"
 #include "randn.h"
 #include <stdarg.h>
 #include <stdint.h>
@@ -11,6 +12,7 @@
 #define VECTOR_ARENA_SIZE 1024 * 16
 
 struct TensorContext {
+  bool requires_grad;
   Arena *arena;
 };
 
@@ -29,30 +31,41 @@ Tensor *tensor_new_tmp(const int column_count) {
   v->rows = 0;
   v->cols = column_count;
   v->capacity = 0;
+  v->grad = NULL;
   v->data = NULL;
 
   return v;
 }
 
-void tensor_free_tmp(Tensor *v) {
-  if (!v)
-    return;
+int tensor_free_tmp(Tensor *v) {
+  if (!v) {
+    return 0; // NULL is valid for free operations
+  }
 
   if (v->data)
     free(v->data);
   free(v);
+  return 0;
 }
 
-void tensor_append_tmp(Tensor *dest, const float *row_data) {
-  if (!dest || !row_data)
-    return;
+int tensor_append_tmp(Tensor *dest, const float *row_data) {
+  if (!dest) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "tensor is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
+
+  if (!row_data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "row data is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
 
   if ((size_t)dest->rows == dest->capacity) {
     size_t new_cap = dest->capacity ? dest->capacity * 2 : 4;
     float *tmp = realloc(dest->data, new_cap * dest->cols * sizeof *tmp);
     if (!tmp) {
-      // Cannot set error for tmp tensors - they don't have a context
-      return;
+      ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
+                       "failed to grow temporary tensor capacity");
+      return CTORCH_ERROR_OUT_OF_MEMORY;
     }
     dest->data = tmp;
     dest->capacity = new_cap;
@@ -60,11 +73,12 @@ void tensor_append_tmp(Tensor *dest, const float *row_data) {
   memcpy(dest->data + dest->rows * dest->cols, row_data,
          dest->cols * sizeof *row_data);
   dest->rows++;
+  return 0;
 }
 
 // Public functions
 
-TensorContext *tensor_create(void) {
+TensorContext *tensor_create(bool requires_grad) {
   Arena *arena = arena_create(VECTOR_ARENA_SIZE);
   if (!arena)
     return NULL;
@@ -76,6 +90,7 @@ TensorContext *tensor_create(void) {
   }
 
   ctx->arena = arena;
+  ctx->requires_grad = requires_grad;
   return ctx;
 }
 
@@ -103,18 +118,25 @@ Tensor *tensor_new(TensorContext *ctx, const int column_count) {
   v->rows = 0;
   v->cols = column_count;
   v->capacity = 0;
+  v->grad = NULL;
   v->data = NULL;
 
   return v;
 }
 
-void tensor_print(Tensor *src, int count, bool shuffle) {
-  if (!src)
-    return;
+int tensor_print(Tensor *src, int count, bool shuffle) {
+  if (!src) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "tensor is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
 
   size_t rows = count <= 0 ? src->rows : count;
 
-  printf("[");
+  if (printf("[") < 0) {
+    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY, "output operation failed");
+    return CTORCH_ERROR_OUT_OF_MEMORY;
+  }
+
   for (size_t i = 0; i < rows; i++) {
     printf("[");
     for (size_t j = 0; j < src->cols; j++) {
@@ -133,31 +155,33 @@ void tensor_print(Tensor *src, int count, bool shuffle) {
       printf("]");
   }
   printf("]\n");
+  return 0;
 }
 
-void tensor_free(TensorContext *ctx) {
-  if (!ctx)
-    return;
+int tensor_free(TensorContext *ctx) {
+  if (!ctx) {
+    return 0; // NULL is valid for free operations
+  }
 
   arena_free(ctx->arena);
   free(ctx);
+  return 0;
 }
 
-void tensor_append(TensorContext *ctx, Tensor *dest, const float *row_data) {
+int tensor_append(TensorContext *ctx, Tensor *dest, const float *row_data) {
   if (!ctx) {
-    return;
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
   }
 
   if (!dest) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "destination tensor is NULL");
-    return;
+    return CTORCH_ERROR_NULL_PARAMETER;
   }
 
   if (!row_data) {
-    ctorch_set_error_fmt(CTORCH_ERROR_NULL_PARAMETER,
-                         "row data is NULL (tensor shape: %zux%zu)", dest->rows,
-                         dest->cols);
-    return;
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "row data is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
   }
 
   if ((size_t)dest->rows == dest->capacity) {
@@ -165,11 +189,9 @@ void tensor_append(TensorContext *ctx, Tensor *dest, const float *row_data) {
     float *tmp = arena_alloc(ctx->arena, new_cap * dest->cols * sizeof *tmp,
                              ARENA_ALIGNOF(float));
     if (!tmp) {
-      ctorch_set_error_fmt(CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
-                           "failed to grow tensor capacity (current: %zu rows, "
-                           "attempting: %zu rows)",
-                           dest->capacity, new_cap);
-      return;
+      ctorch_set_error(CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
+                       "failed to grow tensor capacity");
+      return CTORCH_ERROR_ARENA_ALLOCATION_FAILED;
     }
     memcpy(tmp, dest->data, dest->rows * dest->cols * sizeof *dest->data);
     dest->data = tmp;
@@ -178,29 +200,33 @@ void tensor_append(TensorContext *ctx, Tensor *dest, const float *row_data) {
   memcpy(dest->data + dest->rows * dest->cols, row_data,
          dest->cols * sizeof *row_data);
   dest->rows++;
+  return 0;
 }
 
-void tensor_append_all(TensorContext *ctx, Tensor *dest, const float **row_data,
-                       size_t size) {
+int tensor_append_all(TensorContext *ctx, Tensor *dest, const float **row_data,
+                      size_t size) {
   if (!ctx) {
-    return;
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
   }
 
   if (!dest) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "destination tensor is NULL");
-    return;
+    return CTORCH_ERROR_NULL_PARAMETER;
   }
 
   if (!row_data) {
-    ctorch_set_error_fmt(
-        CTORCH_ERROR_NULL_PARAMETER,
-        "row data array is NULL (attempting to append %zu rows)", size);
-    return;
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "row data array is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
   }
 
   for (size_t i = 0; i < size; i++) {
-    tensor_append(ctx, dest, row_data[i]);
+    int ret = tensor_append(ctx, dest, row_data[i]);
+    if (ret < 0) {
+      return ret; // Propagate error
+    }
   }
+  return 0;
 }
 
 float tensor_get(const Tensor *src, size_t row, size_t col) {
@@ -216,13 +242,18 @@ float tensor_get(const Tensor *src, size_t row, size_t col) {
   return src->data[row * src->cols + col];
 }
 
-void tensor_transpose(Tensor *src) {
-  if (!src)
-    return;
+int tensor_transpose(Tensor *src) {
+  if (!src) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "tensor is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
 
   Tensor *tmp = tensor_new_tmp(src->rows);
-  if (!tmp)
-    return;
+  if (!tmp) {
+    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
+                     "failed to allocate temporary tensor for transpose");
+    return CTORCH_ERROR_OUT_OF_MEMORY;
+  }
 
   for (size_t i = 0; i < src->cols; i++) {
     float rows[src->rows];
@@ -231,7 +262,11 @@ void tensor_transpose(Tensor *src) {
     for (size_t j = 0; j < src->rows; j++) {
       rows[j] = tensor_get(src, j, i);
     }
-    tensor_append_tmp(tmp, rows);
+    int ret = tensor_append_tmp(tmp, rows);
+    if (ret < 0) {
+      tensor_free_tmp(tmp);
+      return ret; // Propagate error
+    }
   }
 
   // Copy data
@@ -240,6 +275,35 @@ void tensor_transpose(Tensor *src) {
   src->cols = tmp->cols;
   src->capacity = tmp->capacity;
   tensor_free_tmp(tmp);
+  return 0;
+}
+
+float *scalar_randn(TensorContext *ctx, size_t size) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!size) {
+    ctorch_set_error_fmt(CTORCH_ERROR_INVALID_SHAPE,
+                         "size must be positive (received: %zu)", size);
+    return NULL;
+  }
+
+  float *v =
+      arena_alloc(ctx->arena, size * sizeof(float), ARENA_ALIGNOF(float));
+  if (!v) {
+    ctorch_set_error_fmt(
+        CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
+        "failed to allocate scalar (requested size: %zu bytes)", size);
+    return NULL;
+  }
+
+  for (size_t i = 0; i < size; i++) {
+    v[i] = randn();
+  }
+
+  return v;
 }
 
 Tensor *tensor_randn(TensorContext *ctx, size_t rows, size_t cols) {
@@ -428,4 +492,179 @@ float *tensor_slice(TensorContext *ctx, Tensor *src, size_t index, Axis axis) {
     }
     return result;
   }
+}
+
+Tensor *tensor_zeros(TensorContext *ctx, size_t rows, size_t cols) {
+  if (!ctx) {
+    return NULL;
+  }
+
+  if (!rows || !cols) {
+    ctorch_set_error_fmt(CTORCH_ERROR_INVALID_SHAPE,
+                         "dimensions must be positive (received: %zux%zu)",
+                         rows, cols);
+    return NULL;
+  }
+
+  Tensor *v = tensor_new(ctx, cols);
+  if (!v)
+    return NULL;
+
+  for (size_t i = 0; i < rows; i++) {
+    float tmp[cols];
+    memset(tmp, 0, sizeof(tmp));
+
+    for (size_t j = 0; j < cols; j++) {
+      tmp[j] = 0.0;
+    }
+    tensor_append(ctx, v, tmp);
+  }
+
+  return v;
+}
+
+Tensor *tensor_sum_rows(TensorContext *ctx, Tensor *src) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!src) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "source tensor is NULL");
+    return NULL;
+  }
+
+  Tensor *v = tensor_new(ctx, 1);
+  if (!v)
+    return NULL;
+
+  for (size_t i = 0; i < src->rows; i++) {
+    float sum = 0;
+    for (size_t j = 0; j < src->cols; j++) {
+      sum += tensor_get(src, i, j);
+    }
+    float row_sum[] = {sum};
+    tensor_append(ctx, v, row_sum);
+  }
+
+  return v;
+}
+
+Tensor *tensor_mul_elementwise(TensorContext *ctx, Tensor *a, Tensor *b) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!a || !b) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
+                     !a ? "tensor a is NULL" : "tensor b is NULL");
+    return NULL;
+  }
+
+  if (a->rows != b->rows || a->cols != b->cols) {
+    ctorch_set_error_fmt(CTORCH_ERROR_DIMENSION_MISMATCH,
+                         "dimension mismatch (a: %zux%zu, b: %zux%zu) - "
+                         "expected same shape",
+                         a->rows, a->cols, b->rows, b->cols);
+    return NULL;
+  }
+
+  Tensor *v = tensor_new(ctx, a->cols);
+  if (!v)
+    return NULL;
+
+  for (size_t i = 0; i < a->rows; i++) {
+    float row_data[a->cols];
+    for (size_t j = 0; j < a->cols; j++) {
+      row_data[j] = tensor_get(a, i, j) * tensor_get(b, i, j);
+    }
+    tensor_append(ctx, v, row_data);
+  }
+
+  return v;
+}
+
+Tensor *tensor_copy(TensorContext *ctx, Tensor *src) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!src) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "source tensor is NULL");
+    return NULL;
+  }
+
+  Tensor *copy = tensor_new(ctx, src->cols);
+  if (!copy)
+    return NULL;
+
+  // Allocate capacity to match source tensor
+  if (src->rows > 0) {
+    size_t total_size = src->rows * src->cols;
+    copy->data = arena_alloc(ctx->arena, total_size * sizeof(float),
+                             ARENA_ALIGNOF(float));
+    if (!copy->data) {
+      ctorch_set_error(CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
+                       "failed to allocate tensor copy data");
+      return NULL;
+    }
+
+    // Copy data
+    memcpy(copy->data, src->data, total_size * sizeof(float));
+    copy->rows = src->rows;
+    copy->capacity = src->rows;
+  }
+
+  // Note: gradient is NOT copied (remains NULL)
+  copy->grad = NULL;
+
+  return copy;
+}
+
+int tensor_allocate_grad(TensorContext *ctx, Tensor *t) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
+
+  if (!t) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "tensor is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
+
+  // If gradient already allocated, nothing to do
+  if (t->grad)
+    return 0;
+
+  // Only allocate if requires_grad is true
+  if (!ctx->requires_grad)
+    return 0;
+
+  size_t grad_size = t->rows * t->cols;
+  if (grad_size == 0)
+    return 0; // Empty tensor, no gradient needed
+
+  t->grad =
+      arena_alloc(ctx->arena, grad_size * sizeof(float), ARENA_ALIGNOF(float));
+  if (!t->grad) {
+    ctorch_set_error_fmt(
+        CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
+        "failed to allocate gradient array (requested: %zu floats)", grad_size);
+    return CTORCH_ERROR_ARENA_ALLOCATION_FAILED;
+  }
+
+  // Initialize gradient to zero
+  memset(t->grad, 0, grad_size * sizeof(float));
+
+  return 0;
+}
+
+void tensor_zero_grad(Tensor *t) {
+  if (!t || !t->grad)
+    return;
+
+  size_t grad_size = t->rows * t->cols;
+  memset(t->grad, 0, grad_size * sizeof(float));
 }
