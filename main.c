@@ -41,7 +41,7 @@ Tensor *spiral_data(TensorContext *ctx, size_t n, size_t classes) {
 int main(void) {
   srand(time(NULL));
 
-  TensorContext *ctx = tensor_create(true);
+  TensorContext *ctx = tensor_create();
   Tensor *inputs = spiral_data(ctx, 100, 3);
 
   if (!inputs) {

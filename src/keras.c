@@ -38,7 +38,7 @@ DenseContext *dense_init(size_t input_size) {
     return NULL;
   }
 
-  ctx->tensor_ctx = tensor_create(true);
+  ctx->tensor_ctx = tensor_create();
   if (!ctx->tensor_ctx) {
     ctorch_set_error(CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
                      "failed to create tensor context");

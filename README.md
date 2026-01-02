@@ -190,7 +190,6 @@ All public functions include comprehensive docstrings in the header files:
 - Error handling: Functions now use global error context instead of return codes
 
 ### Breaking Changes (v0.0.0-dev02)
-- `tensor_create()` now requires `bool requires_grad` parameter
 - Float precision used throughout (changed from `double` to `float`)
 
 ## Roadmap

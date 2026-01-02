@@ -42,7 +42,7 @@ typedef struct TensorContext TensorContext;
  *                      with this context (required for backpropagation)
  * @return Pointer to new TensorContext, or NULL on allocation failure
  */
-TensorContext *tensor_create(bool requires_grad);
+TensorContext *tensor_create(void);
 
 /**
  * @brief Creates a new tensor with specified column count.

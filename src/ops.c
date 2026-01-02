@@ -8,7 +8,6 @@
 
 // Access to TensorContext internals for gradient allocation
 struct TensorContext {
-  bool requires_grad;
   Arena *arena;
 };
 

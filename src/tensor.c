@@ -12,7 +12,6 @@
 #define VECTOR_ARENA_SIZE 1024 * 16
 
 struct TensorContext {
-  bool requires_grad;
   Arena *arena;
 };
 
@@ -78,7 +77,7 @@ int tensor_append_tmp(Tensor *dest, const float *row_data) {
 
 // Public functions
 
-TensorContext *tensor_create(bool requires_grad) {
+TensorContext *tensor_create(void) {
   Arena *arena = arena_create(VECTOR_ARENA_SIZE);
   if (!arena)
     return NULL;
@@ -90,7 +89,6 @@ TensorContext *tensor_create(bool requires_grad) {
   }
 
   ctx->arena = arena;
-  ctx->requires_grad = requires_grad;
   return ctx;
 }
 
@@ -636,10 +634,6 @@ int tensor_allocate_grad(TensorContext *ctx, Tensor *t) {
 
   // If gradient already allocated, nothing to do
   if (t->grad)
-    return 0;
-
-  // Only allocate if requires_grad is true
-  if (!ctx->requires_grad)
     return 0;
 
   size_t grad_size = t->rows * t->cols;
