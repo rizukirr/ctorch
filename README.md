@@ -86,7 +86,7 @@ The debug build includes AddressSanitizer (`-fsanitize=address`) for detecting m
 
 int main(void) {
     // Create tensor context for memory management (with gradient tracking)
-    TensorContext *ctx = tensor_create(true);
+    TensorContext *ctx = tensor_create();
 
     // Create input data (100 samples x 2 features)
     Tensor *inputs = tensor_randn(ctx, 100, 2);
@@ -125,7 +125,7 @@ int main(void) {
     Dense *layer2 = dense_create(ctx, 3);  // 3 output classes
 
     // Create input
-    TensorContext *tensor_ctx = tensor_create(true);
+    TensorContext *tensor_ctx = tensor_create();
     Tensor *inputs = tensor_randn(tensor_ctx, 100, 2);
 
     // Forward pass
