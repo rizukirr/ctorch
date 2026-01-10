@@ -38,8 +38,6 @@ typedef struct TensorContext TensorContext;
  * All tensors created with this context will be freed when the context is
  * freed.
  *
- * @param requires_grad If true, enables gradient tracking for tensors created
- *                      with this context (required for backpropagation)
  * @return Pointer to new TensorContext, or NULL on allocation failure
  */
 TensorContext *tensor_create(void);
@@ -334,13 +332,14 @@ Tensor *tensor_copy(TensorContext *ctx, Tensor *src);
 int tensor_allocate_grad(TensorContext *ctx, Tensor *t);
 
 /**
- * @brief Zeros out the gradient of a tensor.
+ * @brief Fills a float array with zeros.
  *
- * Sets all gradient values to zero. If the gradient array is not allocated,
- * this is a no-op.
+ * Sets all elements in the array to zero using memset. This is a utility
+ * function used to zero out gradients and other float arrays.
  *
- * @param t Tensor whose gradient should be zeroed
+ * @param dest Float array to fill with zeros
+ * @param size Number of elements in the array
  */
-void tensor_zero_grad(Tensor *t);
+void tensor_fill_zero(float *dest, size_t size);
 
 #endif // CTORCH_TENSOR_H

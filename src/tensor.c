@@ -510,11 +510,7 @@ Tensor *tensor_zeros(TensorContext *ctx, size_t rows, size_t cols) {
 
   for (size_t i = 0; i < rows; i++) {
     float tmp[cols];
-    memset(tmp, 0, sizeof(tmp));
-
-    for (size_t j = 0; j < cols; j++) {
-      tmp[j] = 0.0;
-    }
+    memset(tmp, 0.0, sizeof(tmp));
     tensor_append(ctx, v, tmp);
   }
 
@@ -655,10 +651,9 @@ int tensor_allocate_grad(TensorContext *ctx, Tensor *t) {
   return 0;
 }
 
-void tensor_zero_grad(Tensor *t) {
-  if (!t || !t->grad)
+void tensor_fill_zero(float *dest, size_t size) {
+  if (!dest || size <= 0)
     return;
 
-  size_t grad_size = t->rows * t->cols;
-  memset(t->grad, 0, grad_size * sizeof(float));
+  memset(dest, 0.0, size * sizeof(float));
 }

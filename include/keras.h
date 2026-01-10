@@ -15,8 +15,9 @@ typedef struct Dense {
   Tensor *inputs;         // Cached input from forward pass (for backward)
   Tensor *pre_activation; // Cached pre-activation (for backward through
                           // activations)
-  Activation activation;  // Activation function used
-  size_t output_size;     // Number of output neurons (for gradient allocation)
+  struct Dense *prev;
+  Activation activation; // Activation function used
+  size_t output_size;    // Number of output neurons (for gradient allocation)
 } Dense;
 
 typedef enum { CrossEntropy } Loss;
@@ -48,6 +49,14 @@ DenseContext *dense_init(size_t input_size);
 Dense *dense_create(DenseContext *ctx, size_t output_size);
 
 /**
+ * @brief Returns the number of Dense layers in the context.
+ *
+ * @param ctx Dense layer context
+ * @return Number of Dense layers in the context
+ */
+size_t dense_num_layers(DenseContext *ctx);
+
+/**
  * @brief Performs forward pass through a Dense layer.
  *
  * Computes the output of the dense layer: output = inputs * weights + biases
@@ -71,9 +80,9 @@ Tensor *dense_forward(DenseContext *ctx, Dense *dense, Tensor *inputs,
  * @param ctx Dense layer context
  * @param dense The Dense layer to backpropagate through
  * @param grad_output Gradient flowing back from the next layer
- * @return Gradient with respect to inputs, or NULL on error
+ * @return  0 on success, negative error code on failure
  */
-Tensor *dense_backward(DenseContext *ctx, Dense *dense, Tensor *grad_output);
+int dense_backward(DenseContext *ctx, Dense *dense, Tensor *grad_output);
 
 /**
  * @brief Zeros all gradients in the Dense layer.
@@ -83,7 +92,17 @@ Tensor *dense_backward(DenseContext *ctx, Dense *dense, Tensor *grad_output);
  *
  * @param dense The Dense layer whose gradients should be zeroed
  */
-void dense_zero_grad(Dense *dense);
+void dense_reset_grad(Dense *dense);
+
+/**
+ * @brief Resets the layer chain for a new forward pass.
+ *
+ * Must be called before each forward pass to reset the automatic layer
+ * chaining mechanism.
+ *
+ * @param ctx Dense layer context
+ */
+void dense_reset_chain(DenseContext *ctx);
 
 /**
  * @brief Performs SGD optimization step for all Dense layers.

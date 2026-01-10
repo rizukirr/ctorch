@@ -168,7 +168,7 @@ All public functions include comprehensive docstrings in the header files:
   - Combined Softmax + Cross-Entropy loss
 - **Implemented SGD optimizer** - Stochastic Gradient Descent with configurable learning rate
 - Added gradient tracking with `requires_grad` parameter in `tensor_create()`
-- Enhanced Dense layer API with `dense_backward()` and `dense_zero_grad()`
+- Enhanced Dense layer API with `dense_backward()` and `dense_reset_grad()`
 - Added utility functions: `tensor_zeros()`, `tensor_subtract()`, `tensor_accuracy()`
 - **Documentation overhaul** - Added/fixed docstrings for all public API functions
 - Added `scalar_randn()` for 1D random array generation

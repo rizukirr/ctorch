@@ -55,9 +55,9 @@ int main(void) {
   DenseContext *dense_ctx = dense_init(2);
 
   Dense *l1 = dense_create(dense_ctx, 3);
-  Dense *l2 = dense_create(dense_ctx, 4);
-  Dense *l3 = dense_create(dense_ctx, 4);
-  Dense *l4 = dense_create(dense_ctx, 4);
+  Dense *l2 = dense_create(dense_ctx, 3);
+  Dense *l3 = dense_create(dense_ctx, 3);
+  Dense *l4 = dense_create(dense_ctx, 3);
   Dense *l5 = dense_create(dense_ctx, 3);
 
   // Create array of layers for optimizer
@@ -65,7 +65,7 @@ int main(void) {
   size_t num_layers = 5;
 
   // Training hyperparameters
-  size_t num_epochs = 100;
+  size_t num_epochs = 500;
   float learning_rate = 0.1f;
 
   printf("Training neural network on spiral dataset...\n");
@@ -73,9 +73,12 @@ int main(void) {
 
   // Training loop
   for (size_t epoch = 0; epoch < num_epochs; epoch++) {
+    // Reset layer chain for new forward pass
+    dense_reset_chain(dense_ctx);
+
     // Zero gradients
     for (size_t i = 0; i < num_layers; i++) {
-      dense_zero_grad(layers[i]);
+      dense_reset_grad(layers[i]);
     }
 
     // Forward pass
@@ -100,14 +103,12 @@ int main(void) {
 
     // Calculate average loss
     float avg_loss = tensor_avg(losses);
-
-    // Calculate accuracy
-    float accuracy = tensor_accuracy(yh5, y);
+    float avg_acc = tensor_accuracy(yh5, y);
 
     // Print progress every 10 epochs
     if (epoch % 10 == 0 || epoch == num_epochs - 1) {
-      printf("Epoch %3zu: Loss = %.4f, Accuracy = %.2f%%\n", epoch, avg_loss,
-             accuracy);
+      printf("Epoch %3zu: Loss = %.4f accuracy = %.4f\n", epoch, avg_loss,
+             avg_acc);
     }
 
     // Backward pass
@@ -122,12 +123,16 @@ int main(void) {
       return 1;
     }
 
-    Tensor *grad_yh4 = dense_backward(dense_ctx, l5, grad_yh5);
-    Tensor *grad_yh3 = dense_backward(dense_ctx, l4, grad_yh4);
-    Tensor *grad_yh2 = dense_backward(dense_ctx, l3, grad_yh3);
-    Tensor *grad_yh1 = dense_backward(dense_ctx, l2, grad_yh2);
-    Tensor *grad_x = dense_backward(dense_ctx, l1, grad_yh1);
-    (void)grad_x; // Unused, suppress warning
+    int grad_x = dense_backward(dense_ctx, l5, grad_yh5);
+    if (grad_x < 0) {
+      char *error_msg = ctorch_get_error();
+      if (error_msg) {
+        fprintf(stderr, "Backward error: %s\n", error_msg);
+      }
+      dense_free(dense_ctx);
+      tensor_free(ctx);
+      return 1;
+    }
 
     // Optimizer step
     int ret = sgd_step(dense_ctx, layers, num_layers, learning_rate);

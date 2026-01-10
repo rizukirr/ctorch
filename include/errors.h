@@ -40,6 +40,9 @@ typedef enum {
   // Tensor operation errors
   CTORCH_ERROR_INVALID_SLICE = -10,    ///< Invalid slice parameters provided
   CTORCH_ERROR_TRANSPOSE_FAILED = -11, ///< Transpose operation failed
+
+  // General Errors
+  CTORCH_ERROR_UNKNOWN = -666, ///< Unknown error occurred
 } CTorchError;
 
 /**

@@ -11,6 +11,8 @@ struct DenseContext {
   TensorContext *tensor_ctx;
   size_t input_size;
   Arena *arena;
+  Dense *last_layer; // Track last layer for automatic chaining,
+  size_t num_layers;
 };
 
 DenseContext *dense_init(size_t input_size) {
@@ -48,6 +50,7 @@ DenseContext *dense_init(size_t input_size) {
   }
   ctx->input_size = input_size;
   ctx->arena = arena;
+  ctx->last_layer = NULL;
   return ctx;
 }
 
@@ -90,8 +93,16 @@ Dense *dense_create(DenseContext *ctx, size_t output_size) {
   dense->pre_activation = NULL;
   dense->output_size = output_size;
 
+  ctx->num_layers++;
   ctx->input_size = output_size;
   return dense;
+}
+
+size_t dense_num_layers(DenseContext *ctx) {
+  if (!ctx) {
+    return 0;
+  }
+  return ctx->num_layers;
 }
 
 Tensor *dense_forward(DenseContext *ctx, Dense *dense, Tensor *inputs,
@@ -120,12 +131,16 @@ Tensor *dense_forward(DenseContext *ctx, Dense *dense, Tensor *inputs,
     return NULL;
   }
 
+  Tensor *af = NULL;
+
+  // Build backward chain: current layer's prev points to last used layer
+  dense->prev = ctx->last_layer;
+  ctx->last_layer = dense;
   // Cache input for backward pass
   dense->inputs = inputs;
 
   // Compute affine transformation
-  Tensor *af =
-      affine_transform(ctx->tensor_ctx, inputs, dense->weights, dense->biases);
+  af = affine_transform(ctx->tensor_ctx, inputs, dense->weights, dense->biases);
 
   if (!af) {
     ctorch_set_error(CTORCH_ERROR_NULL_DATA, "affine transform failed");
@@ -169,132 +184,136 @@ Tensor *dense_forward(DenseContext *ctx, Dense *dense, Tensor *inputs,
 
   // Cache output (post-activation) for backward pass
   dense->outputs = af;
-
   return af;
 }
 
-Tensor *dense_backward(DenseContext *ctx, Dense *dense, Tensor *grad_output) {
+int dense_backward(DenseContext *ctx, Dense *dense, Tensor *grad_output) {
   if (!ctx) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
-    return NULL;
+    return CTORCH_ERROR_NULL_PARAMETER;
   }
 
   if (!dense) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "dense layer is NULL");
-    return NULL;
+    return CTORCH_ERROR_NULL_PARAMETER;
   }
 
   if (!grad_output) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
                      "gradient output tensor is NULL");
-    return NULL;
+    return CTORCH_ERROR_NULL_PARAMETER;
   }
 
-  // Allocate gradient for pre-activation tensor
-  Tensor *grad_pre_activation = tensor_new(ctx->tensor_ctx, grad_output->cols);
-  if (!grad_pre_activation)
-    return NULL;
+  Dense *prev = dense;
+  Tensor *grad = grad_output;
 
-  // Copy shape from grad_output
-  for (size_t i = 0; i < grad_output->rows; i++) {
-    float row[grad_output->cols];
-    for (size_t j = 0; j < grad_output->cols; j++) {
-      row[j] = 0.0f;
+  while (prev) {
+    // Allocate gradient for pre-activation tensor
+    Tensor *grad_pre_activation =
+        tensor_zeros(ctx->tensor_ctx, grad->rows, grad->cols);
+
+    // Backward through activation function
+    int ret = 0;
+    switch (prev->activation) {
+    case None:
+      // No activation - pass through gradient
+      memcpy(grad_pre_activation->data, grad->data,
+             grad->rows * grad->cols * sizeof(float));
+      break;
+    case ReLU:
+      ret = relu_backward(ctx->tensor_ctx, grad, prev->pre_activation,
+                          grad_pre_activation);
+      break;
+    case Sigmoid:
+      ret = sigmoid_backward(ctx->tensor_ctx, grad, prev->outputs,
+                             grad_pre_activation);
+      break;
+    case Tanh:
+      ret = tanh_backward(ctx->tensor_ctx, grad, prev->outputs,
+                          grad_pre_activation);
+      break;
+    case Softmax:
+      // For softmax, gradient typically comes from combined
+      // softmax+cross_entropy In this case, just pass through the gradient
+      memcpy(grad_pre_activation->data, grad->data,
+             grad->rows * grad->cols * sizeof(float));
+      break;
+    default:
+      // No activation - pass through gradient
+      memcpy(grad_pre_activation->data, grad->data,
+             grad->rows * grad->cols * sizeof(float));
+      break;
     }
-    tensor_append(ctx->tensor_ctx, grad_pre_activation, row);
-  }
 
-  // Backward through activation function
-  int ret = 0;
-  switch (dense->activation) {
-  case None:
-    // No activation - pass through gradient
-    memcpy(grad_pre_activation->data, grad_output->data,
-           grad_output->rows * grad_output->cols * sizeof(float));
-    break;
-  case ReLU:
-    ret = relu_backward(ctx->tensor_ctx, grad_output, dense->pre_activation,
-                        grad_pre_activation);
-    break;
-  case Sigmoid:
-    ret = sigmoid_backward(ctx->tensor_ctx, grad_output, dense->outputs,
-                           grad_pre_activation);
-    break;
-  case Tanh:
-    ret = tanh_backward(ctx->tensor_ctx, grad_output, dense->outputs,
-                        grad_pre_activation);
-    break;
-  case Softmax:
-    // For softmax, gradient typically comes from combined softmax+cross_entropy
-    // In this case, just pass through the gradient
-    memcpy(grad_pre_activation->data, grad_output->data,
-           grad_output->rows * grad_output->cols * sizeof(float));
-    break;
-  default:
-    // No activation - pass through gradient
-    memcpy(grad_pre_activation->data, grad_output->data,
-           grad_output->rows * grad_output->cols * sizeof(float));
-    break;
-  }
-
-  if (ret < 0) {
-    return NULL;
-  }
-
-  // Backward through affine transformation
-  Tensor *grad_inputs = NULL;
-  Tensor *grad_weights = NULL;
-  float *grad_bias = NULL;
-
-  affine_backward(ctx->tensor_ctx, grad_pre_activation, dense->inputs,
-                  dense->weights, &grad_inputs, &grad_weights, &grad_bias);
-
-  if (!grad_inputs || !grad_weights || !grad_bias) {
-    return NULL;
-  }
-
-  // Allocate and accumulate gradients for weights
-  tensor_allocate_grad(ctx->tensor_ctx, dense->weights);
-  if (dense->weights->grad) {
-    // Accumulate weight gradients
-    for (size_t i = 0; i < dense->weights->rows * dense->weights->cols; i++) {
-      dense->weights->grad[i] += grad_weights->data[i];
+    if (ret < 0) {
+      return CTORCH_ERROR_UNKNOWN;
     }
-  }
 
-  // Allocate and accumulate gradients for biases
-  if (!dense->grad_biases) {
-    dense->grad_biases = arena_alloc(
-        ctx->arena, dense->output_size * sizeof(float), ARENA_ALIGNOF(float));
-    if (!dense->grad_biases) {
-      ctorch_set_error(CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
-                       "failed to allocate bias gradients");
-      return NULL;
+    // Backward through affine transformation
+    Tensor *grad_inputs = NULL;
+    Tensor *grad_weights = NULL;
+    float *grad_bias = NULL;
+
+    affine_backward(ctx->tensor_ctx, grad_pre_activation, prev->inputs,
+                    prev->weights, &grad_inputs, &grad_weights, &grad_bias);
+
+    if (!grad_inputs || !grad_weights || !grad_bias) {
+      return CTORCH_ERROR_UNKNOWN;
     }
-    memset(dense->grad_biases, 0, dense->output_size * sizeof(float));
+
+    // Allocate and accumulate gradients for weights
+    tensor_allocate_grad(ctx->tensor_ctx, prev->weights);
+    if (prev->weights->grad) {
+      // Accumulate weight gradients
+      for (size_t i = 0; i < prev->weights->rows * prev->weights->cols; i++) {
+        prev->weights->grad[i] += grad_weights->data[i];
+      }
+    }
+
+    // Allocate and accumulate gradients for biases
+    if (!prev->grad_biases) {
+      prev->grad_biases = arena_alloc(
+          ctx->arena, prev->output_size * sizeof(float), ARENA_ALIGNOF(float));
+      if (!prev->grad_biases) {
+        ctorch_set_error(CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
+                         "failed to allocate bias gradients");
+        return CTORCH_ERROR_ARENA_ALLOCATION_FAILED;
+      }
+      memset(prev->grad_biases, 0, prev->output_size * sizeof(float));
+    }
+
+    // Accumulate bias gradients
+    for (size_t i = 0; i < prev->output_size; i++) {
+      prev->grad_biases[i] += grad_bias[i];
+    }
+
+    grad = grad_inputs;
+    prev = prev->prev;
   }
 
-  // Accumulate bias gradients
-  for (size_t i = 0; i < dense->output_size; i++) {
-    dense->grad_biases[i] += grad_bias[i];
-  }
-
-  return grad_inputs;
+  return 0;
 }
 
-void dense_zero_grad(Dense *dense) {
+void dense_reset_grad(Dense *dense) {
   if (!dense)
     return;
 
   // Zero weight gradients
   if (dense->weights && dense->weights->grad) {
-    tensor_zero_grad(dense->weights);
+    tensor_fill_zero(dense->weights->grad,
+                     dense->weights->rows * dense->weights->cols);
   }
 
   // Zero bias gradients
   if (dense->grad_biases) {
-    memset(dense->grad_biases, 0, dense->output_size * sizeof(float));
+    tensor_fill_zero(dense->grad_biases, dense->output_size);
   }
+}
+
+void dense_reset_chain(DenseContext *ctx) {
+  if (!ctx)
+    return;
+  ctx->last_layer = NULL;
 }
 
 int sgd_step(DenseContext *ctx, Dense **layers, size_t num_layers,
