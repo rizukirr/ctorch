@@ -75,3 +75,5 @@ build.sh
 run.sh
 CLAUDE.md
 GEMINI.md
+.claude
+docs

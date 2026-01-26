@@ -2,10 +2,11 @@
 #define RAND_IMPLEMENTATION
 #include "tensor.h"
 #include "arena.h"
+#include "errors.h"
 #include "randn.h"
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 #define VECTOR_ARENA_SIZE 1024 * 16
@@ -290,7 +291,7 @@ Tensor *tensor_select(TensorContext *ctx, Tensor *src, size_t index,
     return NULL;
   }
 
-  if (axis == AxisColum && index >= src->cols) {
+  if (axis == AxisColumn && index >= src->cols) {
     ctorch_set_error_fmt(
         CTORCH_ERROR_OUT_OF_BOUNDS,
         "column index out of bounds (index: %zu, valid range: 0-%zu)", index,
@@ -298,7 +299,7 @@ Tensor *tensor_select(TensorContext *ctx, Tensor *src, size_t index,
     return NULL;
   }
 
-  size_t col_size = axis == AxisColum ? 1 : src->cols;
+  size_t col_size = axis == AxisColumn ? 1 : src->cols;
   Tensor *v = tensor_new(ctx, col_size);
   if (!v)
     return NULL;
@@ -324,6 +325,103 @@ Tensor *tensor_select(TensorContext *ctx, Tensor *src, size_t index,
   return v;
 }
 
+int tensor_put_at(Tensor *src, float data, size_t row_index, size_t col_index) {
+  if (!src) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "source tensor is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
+
+  if (row_index >= src->rows) {
+    ctorch_set_error_fmt(
+        CTORCH_ERROR_OUT_OF_BOUNDS,
+        "row index out of bounds (index: %zu, valid range: 0-%zu)", index,
+        src->rows - 1);
+    return CTORCH_ERROR_OUT_OF_BOUNDS;
+  }
+
+  if (col_index >= src->cols) {
+    ctorch_set_error_fmt(
+        CTORCH_ERROR_OUT_OF_BOUNDS,
+        "column index out of bounds (index: %zu, valid range: 0-%zu)", index,
+        src->cols - 1);
+    return CTORCH_ERROR_OUT_OF_BOUNDS;
+  }
+
+  size_t col_size = src->cols + 1;
+
+  Tensor *tmp = tensor_new_tmp(col_size);
+
+  for (size_t i = 0; i < src->rows; i++) {
+
+    float put_data[col_size];
+    for (size_t j = 0; j < col_size; j++) {
+      if (j == col_index && i == row_index) {
+        put_data[j] = data;
+        continue;
+      }
+      put_data[j] = tensor_get(src, i, j);
+    }
+
+    tensor_append_tmp(tmp, put_data);
+  }
+
+  tensor_copy(tmp, src);
+  tensor_free_tmp(tmp);
+  return 0;
+}
+
+int tensor_copy(Tensor *src, Tensor *dest) {
+  if (!src) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "source tensor is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
+
+  if (!dest) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "destination tensor is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
+
+  if (src->rows != dest->rows || src->cols != dest->cols) {
+    ctorch_set_error_fmt(CTORCH_ERROR_DIMENSION_MISMATCH,
+                         "source and destination tensors must have the same "
+                         "dimensions (source: %zux%zu, destination: %zux%zu)",
+                         src->rows, src->cols, dest->rows, dest->cols);
+    return CTORCH_ERROR_DIMENSION_MISMATCH;
+  }
+
+  memcpy(dest->data, src->data, src->rows * src->cols * sizeof *src->data);
+  memcpy(dest, src, sizeof(Tensor));
+  dest->cols = src->cols;
+  dest->rows = src->rows;
+  dest->capacity = src->capacity;
+
+  return 0;
+}
+
+Tensor *tensor_clone(TensorContext *ctx, Tensor *src) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!src) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "source tensor is NULL");
+    return NULL;
+  }
+
+  Tensor *dest = tensor_new(ctx, src->cols);
+  if (!dest) {
+    return NULL;
+  }
+
+  // Copy each row from source to destination
+  for (size_t i = 0; i < src->rows; i++) {
+    tensor_append(ctx, dest, &src->data[i * src->cols]);
+  }
+
+  return dest;
+}
+
 Tensor *tensor_drop(TensorContext *ctx, Tensor *src, size_t index, Axis axis) {
   if (!ctx) {
     return NULL;
@@ -342,7 +440,7 @@ Tensor *tensor_drop(TensorContext *ctx, Tensor *src, size_t index, Axis axis) {
     return NULL;
   }
 
-  if (axis == AxisColum && index >= src->cols) {
+  if (axis == AxisColumn && index >= src->cols) {
     ctorch_set_error_fmt(
         CTORCH_ERROR_OUT_OF_BOUNDS,
         "column index out of bounds (index: %zu, valid range: 0-%zu)", index,
@@ -350,7 +448,7 @@ Tensor *tensor_drop(TensorContext *ctx, Tensor *src, size_t index, Axis axis) {
     return NULL;
   }
 
-  size_t col_size = axis == AxisColum ? src->cols - 1 : src->cols;
+  size_t col_size = axis == AxisColumn ? src->cols - 1 : src->cols;
   Tensor *v = tensor_new(ctx, col_size);
   if (!v)
     return NULL;
@@ -364,7 +462,7 @@ Tensor *tensor_drop(TensorContext *ctx, Tensor *src, size_t index, Axis axis) {
     size_t dest_idx = 0;
 
     for (size_t j = 0; j < src->cols; j++) {
-      if (axis == AxisColum && j == index)
+      if (axis == AxisColumn && j == index)
         continue;
 
       tmp[dest_idx++] = tensor_get(src, i, j);
@@ -405,7 +503,7 @@ float *tensor_slice(TensorContext *ctx, Tensor *src, size_t index, Axis axis) {
 
     memcpy(result, src->data + index * src->cols, src->cols * sizeof(float));
     return result;
-  } else { // axis == AxisColum
+  } else { // axis == AxisColumn
     if (index >= src->cols) {
       ctorch_set_error_fmt(
           CTORCH_ERROR_OUT_OF_BOUNDS,
@@ -428,4 +526,60 @@ float *tensor_slice(TensorContext *ctx, Tensor *src, size_t index, Axis axis) {
     }
     return result;
   }
+}
+
+float tensor_sum(Tensor *src) {
+  if (!src) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "source tensor is NULL");
+    return NAN;
+  }
+
+  if (!src->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "tensor data is NULL");
+    return NAN;
+  }
+
+  float sum = 0.0f;
+  for (size_t i = 0; i < src->rows; i++) {
+    for (size_t j = 0; j < src->cols; j++) {
+      sum += tensor_get(src, i, j);
+    }
+  }
+  return sum;
+}
+
+float tensor_avg(Tensor *src) {
+  if (!src) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "source tensor is NULL");
+    return NAN;
+  }
+
+  if (!src->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "tensor data is NULL");
+    return NAN;
+  }
+
+  float sum = tensor_sum(src);
+  return sum / (src->rows * src->cols);
+}
+
+Tensor *tensor_dup(TensorContext *ctx, Tensor *src) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!src || !src->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
+                     "source tensor is NULL or Empty");
+    return NULL;
+  }
+
+  Tensor *dest = tensor_new(ctx, src->cols);
+  if (!dest) {
+    return NULL;
+  }
+
+  tensor_copy(src, dest);
+  return dest;
 }

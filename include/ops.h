@@ -99,11 +99,148 @@ void tanhh(Tensor *inputs);
  *   - N is the number of samples
  *
  * @param logits Raw logit values (before softmax) of shape (N, num_classes)
- * @param labels True class indices as a tensor of length N
+ * @param y_true True class indices as a tensor of length N
  * @return Average cross-entropy loss across all samples, or NaN on error
  * @note Uses log-sum-exp trick: log(Σ exp(z)) = max + log(Σ exp(z - max))
- * @note On error, sets global error context via ctorch_set_error() and returns NaN
+ * @note On error, sets global error context via ctorch_set_error() and returns
+ * NaN
  */
-float cross_entropy(Tensor *logits, Tensor *labels);
+Tensor *cross_entropy(TensorContext *ctx, Tensor *logits, Tensor *y_true);
+
+/**
+ * @brief Computes element-wise squared error loss.
+ *
+ * Calculates the squared error between predictions and ground truth for
+ * regression tasks. Uses the formula with 0.5 factor for cleaner gradients.
+ *
+ * Math formula: L = 0.5 * (y_pred - y_true)^2
+ *
+ * @param ctx Memory context for allocation
+ * @param logits Predicted values tensor of shape (N, D)
+ * @param y_true Ground truth values tensor of shape (N, D)
+ * @return Tensor containing element-wise squared errors, or NULL on error
+ * @note On error, sets global error context via ctorch_set_error()
+ */
+Tensor *squared_error(TensorContext *ctx, Tensor *logits, Tensor *y_true);
+
+// Backward pass
+
+/**
+ * @brief Computes gradient of cross-entropy loss with respect to logits.
+ *
+ * For softmax cross-entropy, the gradient simplifies to (softmax_output - y_true) / N
+ * where N is the batch size. This assumes y_true is one-hot encoded.
+ *
+ * Math formula: dL/dZ = (softmax(Z) - Y) / N
+ *
+ * @param ctx Memory context for allocation
+ * @param softmax_output Output of softmax activation of shape (N, num_classes)
+ * @param y_true One-hot encoded ground truth of shape (N, num_classes)
+ * @return Gradient tensor of shape (N, num_classes), or NULL on error
+ */
+Tensor *cross_entropy_backward(TensorContext *ctx, Tensor *softmax_output, Tensor *y_true);
+
+/**
+ * @brief Computes gradient of squared error loss with respect to predictions.
+ *
+ * The gradient of 0.5 * (y_pred - y_true)^2 is (y_pred - y_true) / N
+ * where N is the batch size.
+ *
+ * Math formula: dL/dy_pred = (y_pred - y_true) / N
+ *
+ * @param ctx Memory context for allocation
+ * @param y_pred Predicted values tensor of shape (N, D)
+ * @param y_true Ground truth values tensor of shape (N, D)
+ * @return Gradient tensor of shape (N, D), or NULL on error
+ */
+Tensor *squared_error_backward(TensorContext *ctx, Tensor *y_pred, Tensor *y_true);
+
+/**
+ * @brief Computes gradient of ReLU activation during backpropagation.
+ *
+ * ReLU derivative is 1 for positive inputs and 0 otherwise. The gradient
+ * passes through unchanged where the original input was positive.
+ *
+ * Math formula: dL/dZ = dL/da * (Z > 0 ? 1 : 0)
+ *
+ * @param ctx Memory context for allocation
+ * @param loss_grad Upstream gradient (dL/da) of shape (N, D)
+ * @param logits Original pre-activation inputs to ReLU of shape (N, D)
+ * @return Gradient tensor of shape (N, D), or NULL on error
+ */
+Tensor *relu_backward(TensorContext *ctx, Tensor *loss_grad, Tensor *logits);
+
+/**
+ * @brief Computes gradient of sigmoid activation during backpropagation.
+ *
+ * Sigmoid derivative is sigmoid(x) * (1 - sigmoid(x)). Uses the cached
+ * sigmoid output to avoid recomputation.
+ *
+ * Math formula: dL/dZ = dL/da * sigmoid(Z) * (1 - sigmoid(Z))
+ *
+ * @param ctx Memory context for allocation
+ * @param upstream_grad Upstream gradient (dL/da) of shape (N, D)
+ * @param sigmoid_output Cached output from forward sigmoid pass of shape (N, D)
+ * @return Gradient tensor of shape (N, D), or NULL on error
+ */
+Tensor *sigmoid_backward(TensorContext *ctx, Tensor *upstream_grad, Tensor *sigmoid_output);
+
+/**
+ * @brief Computes gradient of tanh activation during backpropagation.
+ *
+ * Tanh derivative is 1 - tanh(x)^2. Uses the cached tanh output to avoid
+ * recomputation.
+ *
+ * Math formula: dL/dZ = dL/da * (1 - tanh(Z)^2)
+ *
+ * @param ctx Memory context for allocation
+ * @param upstream_grad Upstream gradient (dL/da) of shape (N, D)
+ * @param tanh_output Cached output from forward tanh pass of shape (N, D)
+ * @return Gradient tensor of shape (N, D), or NULL on error
+ */
+Tensor *tanh_backward(TensorContext *ctx, Tensor *upstream_grad, Tensor *tanh_output);
+
+/**
+ * @brief Computes gradient of loss with respect to weights in affine layer.
+ *
+ * For Y = XW + b, the weight gradient is X^T * upstream_grad.
+ *
+ * Math formula: dL/dW = X^T * dL/dY
+ *
+ * @param ctx Memory context for allocation
+ * @param inputs Input tensor X of shape (N, D_in) from forward pass
+ * @param upstream_grad Upstream gradient (dL/dY) of shape (N, D_out)
+ * @return Weight gradient tensor of shape (D_in, D_out), or NULL on error
+ */
+Tensor *weight_gradient(TensorContext *ctx, Tensor *inputs, Tensor *upstream_grad);
+
+/**
+ * @brief Computes gradient of loss with respect to biases in affine layer.
+ *
+ * For Y = XW + b, the bias gradient is the sum of upstream gradients
+ * along the batch dimension.
+ *
+ * Math formula: dL/db = sum(dL/dY, axis=0)
+ *
+ * @param ctx Memory context for allocation
+ * @param upstream_grad Upstream gradient (dL/dY) of shape (N, D_out)
+ * @return Bias gradient tensor of shape (1, D_out), or NULL on error
+ */
+Tensor *bias_gradient(TensorContext *ctx, Tensor *upstream_grad);
+
+/**
+ * @brief Computes gradient of loss with respect to inputs in affine layer.
+ *
+ * For Y = XW + b, the input gradient is upstream_grad * W^T.
+ *
+ * Math formula: dL/dX = dL/dY * W^T
+ *
+ * @param ctx Memory context for allocation
+ * @param upstream_grad Upstream gradient (dL/dY) of shape (N, D_out)
+ * @param weights Weight tensor W of shape (D_in, D_out)
+ * @return Input gradient tensor of shape (N, D_in), or NULL on error
+ */
+Tensor *input_gradient(TensorContext *ctx, Tensor *upstream_grad, Tensor *weights);
+
 
 #endif // CTORCH_OPS_H

@@ -30,14 +30,14 @@ ctorch is a minimal deep learning library written in C that implements core neur
 
 #### Loss Functions
 - [x] **Cross Entropy** - Numerically stable implementation with log-sum-exp trick
-- [ ] Mean Squared Error (MSE)
+- [x] **Squared Error** - Element-wise squared error with 0.5 factor for cleaner gradients
 - [ ] Mean Absolute Error (MAE)
 - [ ] Binary Cross Entropy
 
-### Training (TODO)
-- [ ] **Backpropagation** - Automatic gradient computation
-- [ ] **Optimizers**
-  - [ ] Stochastic Gradient Descent (SGD)
+### Training
+- [x] **Backpropagation** - Gradient computation via `dense_backward()`
+- [x] **Basic SGD** - Inline weight updates in backward pass
+- [ ] **Separate Optimizer Objects**
   - [ ] Adam
   - [ ] RMSprop
   - [ ] Momentum
@@ -57,56 +57,85 @@ ctorch is a minimal deep learning library written in C that implements core neur
 ## Build
 
 ```bash
-mkdir build && cd build
-cmake ..
-make
+# Debug build (includes AddressSanitizer)
+./build.sh && cmake --build build
+
+# Release build (optimized with -O3)
+./build.sh release && cmake --build build
+
+# Build and run
+./run.sh build
+
+# Run the executable
+./build/bin/ctorch
 ```
 
 ## Usage Example
 
 ```c
-#include "ctorch.h"
+#include "keras.h"
+#include "ops.h"
 #include "tensor.h"
 
 int main(void) {
-    // Create tensor context for memory management
-    TensorContext *ctx = tensor_create();
+    // Create data context for inputs/labels
+    TensorContext *data_ctx = tensor_create();
 
-    // Create input data (100 samples x 2 features)
-    Tensor *inputs = tensor_randn(ctx, 100, 2);
+    // Input data: 4 samples, 2 features
+    Tensor *X = tensor_new(data_ctx, 2);
+    float x_data[4][2] = {{0.1f, 0.2f}, {0.3f, 0.4f}, {0.5f, 0.6f}, {0.7f, 0.8f}};
+    for (int i = 0; i < 4; i++)
+        tensor_append(data_ctx, X, x_data[i]);
 
-    // Create weights (4 neurons x 2 input features)
-    Tensor *weights = tensor_randn(ctx, 4, 2);
+    // Labels: one-hot encoded (4 samples, 3 classes)
+    Tensor *Y = tensor_new(data_ctx, 3);
+    float y_data[4][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 1, 0}};
+    for (int i = 0; i < 4; i++)
+        tensor_append(data_ctx, Y, y_data[i]);
 
-    // Create bias
-    double bias[4] = {0.0, 0.0, 0.0, 0.0};
+    // Create network: 2 -> 4 (ReLU) -> 3 (Softmax)
+    DenseContext *model = dense_init(2);
+    dense_create(model, 4, ReLU);
+    dense_create(model, 3, Softmax);
 
-    // Forward pass: affine transform
-    Tensor *logits = affine_transform(ctx, inputs, weights, bias);
+    // Training loop
+    for (int epoch = 0; epoch < 100; epoch++) {
+        Tensor *output = dense_forward(model, X);
+        Tensor *loss_grad = cross_entropy_backward(data_ctx, output, Y);
+        dense_backward(model, 0.5f, loss_grad);
+    }
 
-    // Apply activation function
-    softmax(logits);
-
-    // Print results
-    tensor_print(logits, 10, true);
+    // Evaluate
+    Tensor *predictions = predict(model, X);
+    float acc = accuracy(model, predictions, Y);
+    printf("Accuracy: %.3f\n", acc);
 
     // Cleanup
-    tensor_free(ctx);
+    dense_free(model);
+    tensor_free(data_ctx);
     return 0;
 }
 ```
 
-See `main.c` for a complete example with spiral dataset generation.
+See `main.c` for a complete example.
 
 ## Current Limitations
 
-- No backpropagation (forward pass only)
-- No gradient computation or training
+- No separate optimizer objects (weight updates inline in backward pass)
 - Limited to CPU operations
-- Basic matrix operations only
-- No model persistence
+- Basic matrix operations only (no BLAS)
+- No model persistence (save/load)
+- No batch normalization or dropout
 
 ## Recent Updates
+
+### v0.3.0 - Backpropagation & Training
+- Implemented **backpropagation** via `dense_backward()` with gradient computation
+- Added **Squared Error** loss function with backward pass
+- Implemented **backward pass operations**: `cross_entropy_backward`, `squared_error_backward`, `relu_backward`, `sigmoid_backward`, `tanh_backward`
+- Added gradient computation for affine layers: `weight_gradient`, `bias_gradient`, `input_gradient`
+- Implemented `predict()` and `accuracy()` functions for model evaluation
+- Basic SGD-style weight updates integrated into backward pass
 
 ### v0.2.0 - Major API Refactoring
 - Renamed `Vector` to `Tensor` throughout codebase for better semantic clarity
@@ -115,10 +144,8 @@ See `main.c` for a complete example with spiral dataset generation.
 - Reorganized codebase: split monolithic `ctorch.h` into modular headers (`ops.h`, `tensor.h`, `keras.h`)
 - Added **Tanh** activation function
 - Improved cross-entropy with numerically stable log-sum-exp implementation
-- Fixed documentation mismatches and parameter typos
-- Updated all function signatures and examples to use new Tensor API
 
-### Breaking Changes
+### Breaking Changes (v0.2.0)
 - All `vector_*` functions renamed to `tensor_*`
 - `VectorContext` renamed to `TensorContext`
 - Activation functions simplified: `activation_ReLU()` to `relu()`, `activation_softmax()` to `softmax()`
@@ -128,13 +155,14 @@ See `main.c` for a complete example with spiral dataset generation.
 
 1. [DONE] Implement cross entropy loss function
 2. [DONE] Add tanh activation function
-3. Add backpropagation for gradient computation
-4. Implement SGD optimizer
-5. Add more activation functions (leaky ReLU, ELU)
-6. Build a complete training loop example
-7. Add convolutional layers
-8. Implement batch normalization and dropout
-9. Model serialization
+3. [DONE] Add backpropagation for gradient computation
+4. [DONE] Implement basic SGD weight updates
+5. [DONE] Build a complete training loop example
+6. Add separate optimizer objects (Adam, RMSprop, Momentum)
+7. Add more activation functions (Leaky ReLU, ELU)
+8. Add convolutional layers
+9. Implement batch normalization and dropout
+10. Model serialization (save/load)
 
 ## License
 

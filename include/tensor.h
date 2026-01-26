@@ -1,12 +1,29 @@
 #ifndef CTORCH_TENSOR_H
 #define CTORCH_TENSOR_H
 
-#include "errors.h"
-#include <assert.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #define len(src) (sizeof(src) / sizeof(src[0]))
+
+#define array_append(arena, dest, data)                                        \
+  do {                                                                         \
+    if ((dest)->size == (dest)->capacity) {                                    \
+      size_t new_cap = (dest)->capacity ? (dest)->capacity * 2 : 4;            \
+      void *new_items =                                                        \
+          arena_alloc((arena), new_cap * sizeof(*(dest)->items),               \
+                      ARENA_ALIGNOF(__typeof__(*(dest)->items)));              \
+      if (!new_items)                                                          \
+        abort();                                                               \
+      if ((dest)->items)                                                       \
+        memcpy(new_items, (dest)->items,                                       \
+               (dest)->size * sizeof(*(dest)->items));                         \
+      (dest)->items = new_items;                                               \
+      (dest)->capacity = new_cap;                                              \
+    }                                                                          \
+    (dest)->items[(dest)->size++] = (data);                                    \
+  } while (0)
 
 /**
  * @brief 2D matrix/tensor data structure.
@@ -21,7 +38,7 @@ typedef struct {
   float *data; /** Contiguous array storing matrix data in row-major order */
 } Tensor;
 
-typedef enum { AxisRow, AxisColum } Axis;
+typedef enum { AxisRow, AxisColumn } Axis;
 
 /**
  * @brief Opaque memory context for tensor allocation.
@@ -74,7 +91,8 @@ Tensor *tensor_new_tmp(const int column_count);
  *
  * @param src Tensor to print
  * @param count Maximum number of rows to print (0 or negative for all rows)
- * @param shuffle If true, randomly samples elements instead of sequential access
+ * @param shuffle If true, randomly samples elements instead of sequential
+ * access
  */
 void tensor_print(Tensor *src, int count, bool shuffle);
 
@@ -144,10 +162,24 @@ void tensor_append_all(TensorContext *ctx, Tensor *dest, const float **row_data,
  *
  * @param src Tensor to access
  * @param row AxisRow index (0-based)
- * @param col AxisColum index (0-based)
+ * @param col AxisColumn index (0-based)
  * @return Value at the specified position
  */
 float tensor_get(const Tensor *src, size_t row, size_t col);
+
+/**
+ * @brief Copies tensor data from source to destination.
+ *
+ * Copies all data from src tensor to dest tensor. Both tensors must have
+ * the same dimensions. The destination tensor's data buffer is overwritten
+ * with the source tensor's data.
+ *
+ * @param src Source tensor to copy from
+ * @param dest Destination tensor to copy to
+ * @return 0 on success, negative CTorchError code on failure
+ * @note Both tensors must already be allocated with matching dimensions
+ */
+int tensor_copy(Tensor *src, Tensor *dest);
 
 /**
  * @brief Creates a tensor filled with random normal values.
@@ -185,13 +217,13 @@ void tensor_transpose(Tensor *src);
  *
  * Result shapes:
  *   - AxisRow: Returns tensor of shape (1, cols) containing the selected row
- *   - AxisColum: Returns tensor of shape (rows, 1) containing the selected
+ *   - AxisColumn: Returns tensor of shape (rows, 1) containing the selected
  * column
  *
  * @param ctx Memory context for allocation
  * @param src Source tensor
  * @param index Row or column index to select (0-based)
- * @param axis Either AxisRow or AxisColum to specify selection direction
+ * @param axis Either AxisRow or AxisColumn to specify selection direction
  * @return New tensor containing the selected row/column, or NULL on error
  */
 Tensor *tensor_select(TensorContext *ctx, Tensor *src, size_t index, Axis axis);
@@ -205,13 +237,13 @@ Tensor *tensor_select(TensorContext *ctx, Tensor *src, size_t index, Axis axis);
  *
  * Result:
  *   - AxisRow axis: Returns array of length cols with data from row `index`
- *   - AxisColum axis: Returns array of length rows with data from column
+ *   - AxisColumn axis: Returns array of length rows with data from column
  * `index`
  *
  * @param ctx Memory context for allocation
  * @param src Source tensor
  * @param index Row or column index to extract (0-based)
- * @param axis Either AxisRow or AxisColum to specify slice direction
+ * @param axis Either AxisRow or AxisColumn to specify slice direction
  * @return Float array allocated via arena, or NULL on error
  */
 float *tensor_slice(TensorContext *ctx, Tensor *src, size_t index, Axis axis);
@@ -224,15 +256,43 @@ float *tensor_slice(TensorContext *ctx, Tensor *src, size_t index, Axis axis);
  *
  * Result shapes:
  *   - AxisRow: Returns tensor of shape (rows-1, cols) with row `index` removed
- *   - AxisColum: Returns tensor of shape (rows, cols-1) with column `index`
+ *   - AxisColumn: Returns tensor of shape (rows, cols-1) with column `index`
  * removed
  *
  * @param ctx Memory context for allocation
  * @param src Source tensor
  * @param index Row or column index to remove (0-based)
- * @param axis Either AxisRow or AxisColum to specify drop direction
+ * @param axis Either AxisRow or AxisColumn to specify drop direction
  * @return New tensor with row/column removed, or NULL on error
  */
 Tensor *tensor_drop(TensorContext *ctx, Tensor *src, size_t index, Axis axis);
+
+/**
+ * @brief Computes the sum of all elements in a tensor.
+ *
+ * @param src Tensor to sum
+ * @return Sum of all elements, or NAN on error
+ */
+float tensor_sum(Tensor *src);
+
+/**
+ * @brief Computes the average of all elements in a tensor.
+ *
+ * @param src Tensor to average
+ * @return Average of all elements (sum / (rows * cols)), or NAN on error
+ */
+float tensor_avg(Tensor *src);
+
+/**
+ * @brief Duplicates a tensor.
+ *
+ * Creates a new tensor with the same dimensions and data as the source tensor.
+ * The new tensor is allocated using the same memory context as the source.
+ *
+ * @param ctx Memory context for allocation
+ * @param src Source tensor
+ * @return Pointer to new tensor, or NULL on error
+ */
+Tensor *tensor_dup(TensorContext *ctx, Tensor *src);
 
 #endif // CTORCH_TENSOR_H
