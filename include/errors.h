@@ -85,8 +85,8 @@ CtorchErrorContext *ctorch_error_context(void);
  * Stores an error code and message in the global context for later retrieval.
  * The message string is copied into the arena allocator.
  *
- * @param code Error code from CTorchError enum
- * @param msg Error message string (will be copied)
+ * @param code  Error code from CTorchError enum
+ * @param msg   Error message string (will be copied)
  */
 void ctorch_set_error(CTorchError code, const char *msg);
 
@@ -96,9 +96,9 @@ void ctorch_set_error(CTorchError code, const char *msg);
  * Similar to ctorch_set_error() but allows printf-style formatting.
  * The formatted message is allocated using the arena allocator.
  *
- * @param code Error code from CTorchError enum
- * @param fmt Printf-style format string
- * @param ... Variable arguments for format string
+ * @param code  Error code from CTorchError enum
+ * @param fmt   Printf-style format string
+ * @param ...   Variable arguments for format string
  */
 void ctorch_set_error_fmt(CTorchError code, const char *fmt, ...);
 
@@ -122,9 +122,9 @@ CTorchError ctorch_get_error_code(void);
 /**
  * @brief Sets an error on the specified error context.
  *
- * @param ctx Error context
- * @param code Error code from CTorchError enum
- * @param msg Error message string (will be copied)
+ * @param ctx   Error context
+ * @param code  Error code from CTorchError enum
+ * @param msg   Error message string (will be copied)
  */
 void ctorch_set_error_on(CtorchErrorContext *ctx, CTorchError code,
                          const char *msg);
@@ -132,7 +132,8 @@ void ctorch_set_error_on(CtorchErrorContext *ctx, CTorchError code,
 /**
  * @brief Gets the error message from the specified error context.
  *
- * @param ctx Error context
+ * @param ctx  Error context
+ *
  * @return Error message string, or NULL if no error
  */
 char *ctorch_get_error_from(CtorchErrorContext *ctx);

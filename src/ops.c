@@ -5,18 +5,17 @@
 #include <stdio.h>
 #include <string.h>
 
-Tensor *affine_transform(TensorContext *ctx, Tensor *inputs, Tensor *weights,
-                         float *bias) {
+Tensor *linear(TensorContext *ctx, Tensor *input, Tensor *weight, float *bias) {
   if (!ctx) {
     return NULL;
   }
 
-  if (!inputs) {
+  if (!input) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "input tensor is NULL");
     return NULL;
   }
 
-  if (!weights) {
+  if (!weight) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "weight tensor is NULL");
     return NULL;
   }
@@ -26,255 +25,221 @@ Tensor *affine_transform(TensorContext *ctx, Tensor *inputs, Tensor *weights,
     return NULL;
   }
 
-  if (inputs->cols != weights->rows) {
-    if (inputs->cols == weights->cols) {
-      tensor_transpose(weights);
+  if (input->cols != weight->rows) {
+    if (input->cols == weight->cols) {
+      tensor_transpose(weight);
     } else {
       ctorch_set_error_fmt(CTORCH_ERROR_DIMENSION_MISMATCH,
-                           "dimension mismatch (inputs: %zux%zu, weights: "
-                           "%zux%zu) - expected inputs.cols == weights.rows",
-                           inputs->rows, inputs->cols, weights->rows,
-                           weights->cols);
+                           "dimension mismatch (input: %zux%zu, weight: "
+                           "%zux%zu) - expected input.cols == weight.rows",
+                           input->rows, input->cols, weight->rows,
+                           weight->cols);
       return NULL;
     }
   }
 
-  Tensor *outputs = tensor_new(ctx, weights->cols);
-  if (!outputs){
+  Tensor *output = tensor_create(ctx, weight->cols);
+  if (!output) {
     ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for affine_transform");
+                     "failed to allocate output tensor for linear");
     return NULL;
   }
 
-  for (size_t i = 0; i < inputs->rows; i++) {
-    float dot[weights->cols];
-    memset(dot, 0, sizeof(dot));
+  for (size_t i = 0; i < input->rows; i++) {
+    float row[weight->cols];
 
-    for (size_t k = 0; k < weights->cols; k++) {
-      for (size_t j = 0; j < inputs->cols; j++) {
-        float input = tensor_get(inputs, i, j);
-        float weight = tensor_get(weights, j, k);
-        dot[k] += input * weight;
+    for (size_t k = 0; k < weight->cols; k++) {
+      float sum = bias[k];
+      for (size_t j = 0; j < input->cols; j++) {
+        sum += input->data[i * input->cols + j] *
+               weight->data[j * weight->cols + k];
       }
-      dot[k] += bias[k];
+      row[k] = sum;
     }
-    tensor_append(ctx, outputs, dot);
+    tensor_append(ctx, output, row);
   }
-  return outputs;
+  return output;
 }
 
-void relu(Tensor *inputs) {
-  if (!inputs) {
+void relu(Tensor *input) {
+  if (!input) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "input tensor is NULL");
     return;
   }
 
-  if (!inputs->data) {
+  if (!input->data) {
     ctorch_set_error(CTORCH_ERROR_NULL_DATA, "input tensor data is NULL");
     return;
   }
 
-  Tensor *tmp = tensor_new_tmp(inputs->cols);
-  if (!tmp) {
-    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for ReLU");
-    return;
-  }
-
-  for (size_t i = 0; i < inputs->rows; i++) {
-    float dot[inputs->cols];
-    memset(dot, 0, sizeof(dot));
-
-    for (size_t j = 0; j < inputs->cols; j++) {
-      float input = tensor_get(inputs, i, j);
-      dot[j] = input > 0 ? input : 0;
+  size_t total_elements = input->rows * input->cols;
+  for (size_t i = 0; i < total_elements; i++) {
+    if (input->data[i] < 0.0f) {
+      input->data[i] = 0.0f;
     }
-    tensor_append_tmp(tmp, dot);
   }
-
-  memcpy(inputs->data, tmp->data, tmp->rows * tmp->cols * sizeof *tmp->data);
-  inputs->rows = tmp->rows;
-  inputs->cols = tmp->cols;
-
-  tensor_free_tmp(tmp);
 }
 
-void sigmoid(Tensor *inputs) {
-  if (!inputs) {
+void sigmoid(Tensor *input) {
+  if (!input) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "input tensor is NULL");
     return;
   }
 
-  if (!inputs->data) {
+  if (!input->data) {
     ctorch_set_error(CTORCH_ERROR_NULL_DATA, "input tensor data is NULL");
     return;
   }
 
-  Tensor *tmp = tensor_new_tmp(inputs->cols);
-  if (!tmp) {
-    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for sigmoid");
-    return;
+  size_t total_elements = input->rows * input->cols;
+  for (size_t i = 0; i < total_elements; i++) {
+    input->data[i] = 1.0f / (1.0f + expf(-input->data[i]));
   }
-
-  for (size_t i = 0; i < inputs->rows; i++) {
-    float dot[inputs->cols];
-    memset(dot, 0, sizeof(dot));
-
-    for (size_t j = 0; j < inputs->cols; j++) {
-      float input = tensor_get(inputs, i, j);
-      dot[j] = 1 / (1 + expf(-input));
-    }
-    tensor_append_tmp(tmp, dot);
-  }
-
-  memcpy(inputs->data, tmp->data, tmp->rows * tmp->cols * sizeof *tmp->data);
-  inputs->rows = tmp->rows;
-  inputs->cols = tmp->cols;
-
-  tensor_free_tmp(tmp);
 }
 
-void softmax(Tensor *inputs) {
-  if (!inputs) {
+void softmax(Tensor *input) {
+  if (!input) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "input tensor is NULL");
     return;
   }
 
-  if (!inputs->data) {
+  if (!input->data) {
     ctorch_set_error(CTORCH_ERROR_NULL_DATA, "input tensor data is NULL");
     return;
   }
 
-  Tensor *tmp = tensor_new_tmp(inputs->cols);
-  if (!tmp) {
-    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for softmax");
-    return;
-  }
-
-  for (size_t i = 0; i < inputs->rows; i++) {
-    float dot[inputs->cols];
-    memset(dot, 0, sizeof(dot));
+  // Process each row independently
+  for (size_t i = 0; i < input->rows; i++) {
+    float *row = &input->data[i * input->cols];
 
     // Find max for numerical stability
-    float max = tensor_get(inputs, i, 0);
-    for (size_t j = 1; j < inputs->cols; j++) {
-      float val = tensor_get(inputs, i, j);
-      if (val > max)
-        max = val;
+    float max_val = row[0];
+    for (size_t j = 1; j < input->cols; j++) {
+      if (row[j] > max_val) {
+        max_val = row[j];
+      }
     }
 
-    // Compute sum of exp(input - max)
+    // Compute exp(x - max) and sum in single pass
     float sum = 0.0f;
-    for (size_t j = 0; j < inputs->cols; j++) {
-      float input = tensor_get(inputs, i, j);
-      sum += expf(input - max);
+    for (size_t j = 0; j < input->cols; j++) {
+      row[j] = expf(row[j] - max_val);
+      sum += row[j];
     }
 
-    // Compute softmax with numerical stability
-    for (size_t j = 0; j < inputs->cols; j++) {
-      float input = tensor_get(inputs, i, j);
-      dot[j] = expf(input - max) / sum;
+    // Normalize by sum
+    for (size_t j = 0; j < input->cols; j++) {
+      row[j] /= sum;
     }
-    tensor_append_tmp(tmp, dot);
   }
-
-  memcpy(inputs->data, tmp->data, tmp->rows * tmp->cols * sizeof *tmp->data);
-  inputs->rows = tmp->rows;
-  inputs->cols = tmp->cols;
-
-  tensor_free_tmp(tmp);
 }
 
-void tanhh(Tensor *inputs) {
-  if (!inputs) {
+Tensor *softmax_2dup(TensorContext *ctx, Tensor *input) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!input) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "input tensor is NULL");
+    return NULL;
+  }
+
+  if (!input->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "input tensor data is NULL");
+    return NULL;
+  }
+
+  Tensor *output = tensor_dup(ctx, input);
+  if (!output) {
+    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
+                     "failed to allocate output tensor for softmax");
+    return NULL;
+  }
+  softmax(output);
+  return output;
+}
+
+void tanh_(Tensor *input) {
+  if (!input) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "input tensor is NULL");
     return;
   }
 
-  if (!inputs->data) {
+  if (!input->data) {
     ctorch_set_error(CTORCH_ERROR_NULL_DATA, "input tensor data is NULL");
     return;
   }
 
-  Tensor *tmp = tensor_new_tmp(inputs->cols);
-  if (!tmp) {
-    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for tanh");
-    return;
+  size_t total_elements = input->rows * input->cols;
+  for (size_t i = 0; i < total_elements; i++) {
+    input->data[i] = tanhf(input->data[i]);
   }
-
-  for (size_t i = 0; i < inputs->rows; i++) {
-    float dot[inputs->cols];
-    memset(dot, 0, sizeof(dot));
-
-    for (size_t j = 0; j < inputs->cols; j++) {
-      float input = tensor_get(inputs, i, j);
-      dot[j] = tanhf(input);
-    }
-    tensor_append_tmp(tmp, dot);
-  }
-
-  memcpy(inputs->data, tmp->data, tmp->rows * tmp->cols * sizeof *tmp->data);
-  inputs->rows = tmp->rows;
-  inputs->cols = tmp->cols;
-
-  tensor_free_tmp(tmp);
 }
 
-Tensor *squared_error(TensorContext *ctx, Tensor *y_pred, Tensor *y_true) {
-  if (!y_pred || !y_true) {
+Tensor *mse_loss(TensorContext *ctx, Tensor *prediction, Tensor *target) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!prediction || !target) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                     !y_pred ? "y_pred tensor is NULL"
-                             : "y_true tensor is NULL");
+                     !prediction ? "prediction tensor is NULL"
+                                 : "target tensor is NULL");
     return NULL;
   }
 
-  if (!y_pred->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "logits tensor data is NULL");
+  if (!prediction->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "prediction tensor data is NULL");
     return NULL;
   }
 
-  if (!y_true->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "y_true tensor data is NULL");
+  if (!target->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "target tensor data is NULL");
     return NULL;
   }
 
-  if (y_true->rows != y_pred->rows) {
-    ctorch_set_error_fmt(CTORCH_ERROR_LABEL_MISMATCH,
-                         "label count (%zu) doesn't match sample count (%zu)",
-                         y_true->rows, y_pred->rows);
+  if (target->rows != prediction->rows) {
+    ctorch_set_error_fmt(
+        CTORCH_ERROR_LABEL_MISMATCH,
+        "target count (%zu) doesn't match prediction count (%zu)", target->rows,
+        prediction->rows);
     return NULL;
   }
 
-  Tensor *loss = tensor_new(ctx, y_pred->cols);
-  if (!loss){
+  Tensor *loss = tensor_create(ctx, prediction->cols);
+  if (!loss) {
     ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for squared_error");
+                     "failed to allocate output tensor for mse_loss");
     return NULL;
   }
 
-  for (size_t i = 0; i < y_pred->rows; i++) {
-    float temp[y_pred->cols];
-    memset(temp, 0, sizeof(temp));
+  for (size_t i = 0; i < prediction->rows; i++) {
+    float row[prediction->cols];
 
-    for (size_t j = 0; j < y_pred->cols; j++) {
-      float val = tensor_get(y_pred, i, j);
-      float diff = val - tensor_get(y_true, i, j);
-      temp[j] = 0.5f * powf(diff, 2);
+    for (size_t j = 0; j < prediction->cols; j++) {
+      float pred = prediction->data[i * prediction->cols + j];
+      float tgt = target->data[i * target->cols + j];
+      float diff = pred - tgt;
+      row[j] = 0.5f * diff * diff;
     }
-    tensor_append(ctx, loss, temp);
+    tensor_append(ctx, loss, row);
   }
 
   return loss;
 }
 
-Tensor *cross_entropy(TensorContext *ctx, Tensor *logits, Tensor *y_true) {
-  if (!logits || !y_true) {
+Tensor *cross_entropy(TensorContext *ctx, Tensor *logits, Tensor *target) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!logits || !target) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
                      !logits ? "logits tensor is NULL"
-                             : "y_true tensor is NULL");
+                             : "target tensor is NULL");
     return NULL;
   }
 
@@ -283,432 +248,515 @@ Tensor *cross_entropy(TensorContext *ctx, Tensor *logits, Tensor *y_true) {
     return NULL;
   }
 
-  if (!y_true->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "y_true tensor data is NULL");
+  if (!target->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "target tensor data is NULL");
     return NULL;
   }
 
-  if (y_true->rows != logits->rows) {
+  if (target->rows != logits->rows) {
     ctorch_set_error_fmt(CTORCH_ERROR_LABEL_MISMATCH,
-                         "label count (%zu) doesn't match sample count (%zu)",
-                         y_true->rows, logits->rows);
+                         "target count (%zu) doesn't match sample count (%zu)",
+                         target->rows, logits->rows);
     return NULL;
   }
 
-  Tensor *loss = tensor_new(ctx, logits->cols);
-  if (!loss){
+  Tensor *loss = tensor_create(ctx, target->cols);
+  if (!loss) {
     ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for cross_entropy");
+                     "failed to allocate output tensor for cross_entropy");
     return NULL;
   }
 
   for (size_t i = 0; i < logits->rows; i++) {
-    float temp[logits->cols];
-    memset(temp, 0, sizeof(temp));
+    float row[target->cols];
 
-    float max = tensor_get(logits, i, 0);
-    for (size_t j = 0; j < logits->cols; j++) {
-      float val = tensor_get(logits, i, j);
-      if (val > max)
-        max = val;
+    float *logit_row = &logits->data[i * logits->cols];
+
+    // Find max for numerical stability
+    float max_val = logit_row[0];
+    for (size_t j = 1; j < logits->cols; j++) {
+      if (logit_row[j] > max_val) {
+        max_val = logit_row[j];
+      }
     }
 
+    // Compute log-sum-exp
     float sum = 0.0f;
     for (size_t j = 0; j < logits->cols; j++) {
-      float val = tensor_get(logits, i, j);
-      sum += expf(val - max);
+      sum += expf(logit_row[j] - max_val);
     }
+    float log_sum_exp = logf(sum) + max_val;
 
-    float log_sum_exp = logf(sum) + max;
-
-    for (size_t j = 0; j < y_true->cols; j++) {
-      size_t true_class = (size_t)tensor_get(y_true, i, j);
+    for (size_t j = 0; j < target->cols; j++) {
+      size_t true_class = (size_t)target->data[i * target->cols + j];
 
       if (true_class >= logits->cols) {
         ctorch_set_error_fmt(
             CTORCH_ERROR_OUT_OF_BOUNDS,
-            "label value %zu at index %zu is out of bounds (must be < %zu)",
+            "target value %zu at index %zu is out of bounds (must be < %zu)",
             true_class, i, logits->cols);
         return NULL;
       }
 
-      float y = tensor_get(logits, i, true_class);
-      float l = log_sum_exp - y;
-      temp[j] = l;
+      float logit_val = logit_row[true_class];
+      float loss_val = log_sum_exp - logit_val;
+      row[j] = loss_val;
     }
-    tensor_append(ctx, loss, temp);
+    tensor_append(ctx, loss, row);
   }
 
   return loss;
 }
 
+Tensor *cross_entropy_backward(TensorContext *ctx, Tensor *output,
+                               Tensor *target) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
 
-
-// Backward pass
-Tensor *cross_entropy_backward(TensorContext *ctx, Tensor *softmax_output, Tensor *y_true) {
-  if (!softmax_output || !y_true) {
+  if (!output || !target) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                     !softmax_output ? "y_pred tensor is NULL"
-                             : "y_true tensor is NULL");
+                     !output ? "output tensor is NULL"
+                             : "target tensor is NULL");
     return NULL;
   }
 
-  if (!softmax_output->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "logits tensor data is NULL");
+  if (!output->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "output tensor data is NULL");
     return NULL;
   }
 
-  if (!y_true->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "y_true tensor data is NULL");
+  if (!target->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "target tensor data is NULL");
     return NULL;
   }
 
-  if (y_true->rows != softmax_output->rows) {
+  if (target->rows != output->rows) {
     ctorch_set_error_fmt(CTORCH_ERROR_LABEL_MISMATCH,
-                         "label count (%zu) doesn't match sample count (%zu)",
-                         y_true->rows, softmax_output->rows);
+                         "target count (%zu) doesn't match output count (%zu)",
+                         target->rows, output->rows);
     return NULL;
   }
 
-  Tensor *dL_dZ = tensor_new(ctx, softmax_output->cols);
-  if (!dL_dZ){
-    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for cross_entropy backward");
+  // Detect target format: class indices (cols=1) vs one-hot (cols=num_classes)
+  int is_class_indices = (target->cols == 1);
+  int is_one_hot = (target->cols == output->cols);
+
+  if (!is_class_indices && !is_one_hot) {
+    ctorch_set_error_fmt(
+        CTORCH_ERROR_DIMENSION_MISMATCH,
+        "target cols (%zu) must be 1 (class indices) or %zu (one-hot)",
+        target->cols, output->cols);
     return NULL;
   }
 
-  float N = (float)softmax_output->rows;
-
-  for(size_t i = 0; i < softmax_output->rows; i++){
-    float temp[softmax_output->cols];
-    memset(temp, 0, sizeof(temp));
-
-    for(size_t k = 0; k < softmax_output->cols; k++){
-      float p = tensor_get(softmax_output, i, k);
-      float y = tensor_get(y_true, i, k);
-      float grad = (p - y) / N;
-      temp[k] = grad;
-    }
-    tensor_append(ctx, dL_dZ, temp);
-  }
-
-  return dL_dZ;
-}
-
-Tensor *squared_error_backward(TensorContext *ctx, Tensor *y_pred, Tensor *y_true) {
-  if (!y_pred || !y_true) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                     !y_pred ? "y_pred tensor is NULL"
-                             : "y_true tensor is NULL");
+  Tensor *grad = tensor_create(ctx, output->cols);
+  if (!grad) {
+    ctorch_set_error(
+        CTORCH_ERROR_OUT_OF_MEMORY,
+        "failed to allocate gradient tensor for cross_entropy_backward");
     return NULL;
   }
 
-  if (!y_pred->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "logits tensor data is NULL");
-    return NULL;
-  }
+  float batch_size = (float)output->rows;
 
-  if (!y_true->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "y_true tensor data is NULL");
-    return NULL;
-  }
+  for (size_t i = 0; i < output->rows; i++) {
+    float row[output->cols];
 
-  if (y_true->rows != y_pred->rows) {
-    ctorch_set_error_fmt(CTORCH_ERROR_LABEL_MISMATCH,
-                         "label count (%zu) doesn't match sample count (%zu)",
-                         y_true->rows, y_pred->rows);
-    return NULL;
-  }
+    if (is_class_indices) {
+      // Target is class index: grad = softmax_output - one_hot(target)
+      size_t class_idx = (size_t)target->data[i * target->cols];
 
-  Tensor *dL_dy = tensor_new(ctx, y_pred->cols);
-  if (!dL_dy){
-    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for squared_error backward");
-    return NULL;
-  }
-
-  float N = (float)y_pred->rows;
-
-  for (size_t i = 0; i < y_pred->rows; i++) {
-    float temp[y_pred->cols];
-    memset(temp, 0, sizeof(temp));
-
-    for(size_t k = 0; k < y_pred->cols; k++){
-      float ypred_ik = tensor_get(y_pred, i, k);
-      float ytrue_ik = tensor_get(y_true, i, k);
-      float grad = (ypred_ik - ytrue_ik) / N;
-      temp[k] = grad;
-    }
-    tensor_append(ctx, dL_dy, temp);
-  }
-
-  return dL_dy;
-}
-
-Tensor *relu_backward(TensorContext *ctx, Tensor *loss_grad, Tensor *logits){
-  if (!loss_grad || !logits) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                     !loss_grad ? "loss_grad tensor is NULL"
-                                : "logits tensor is NULL");
-    return NULL;
-  }
-
-  if (!loss_grad->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "loss_grad tensor data is NULL");
-    return NULL;
-  }
-
-  if (!logits->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "logits tensor data is NULL");
-    return NULL;
-  }
-
-  Tensor *dL_dZ = tensor_new(ctx, logits->cols);
-  if (!dL_dZ){
-    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for relu backward");
-    return NULL;
-  }
-  for (size_t i = 0; i < logits->rows; i++) {
-    float temp[logits->cols];
-    memset(temp, 0, sizeof(temp));
-
-    for (size_t k = 0; k < logits->cols; k++) {
-      float val = tensor_get(logits, i, k);
-      float grad = tensor_get(loss_grad, i, k);
-      temp[k] = val > 0 ? grad : 0;
-    }
-    tensor_append(ctx, dL_dZ, temp);
-  }
-
-  return dL_dZ;
-}
-
-Tensor *sigmoid_backward(TensorContext *ctx, Tensor *upstream_grad, Tensor *sigmoid_output) {
-  if (!upstream_grad || !sigmoid_output) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                     !upstream_grad ? "upstream_grad tensor is NULL"
-                                    : "sigmoid_output tensor is NULL");
-    return NULL;
-  }
-
-  if (!upstream_grad->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "upstream_grad tensor data is NULL");
-    return NULL;
-  }
-
-  if (!sigmoid_output->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "sigmoid_output tensor data is NULL");
-    return NULL;
-  }
-
-  Tensor *dL_dZ = tensor_new(ctx, sigmoid_output->cols);
-  if (!dL_dZ){
-    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for sigmoid backward");
-    return NULL;
-  }
-
-  for (size_t i = 0; i < sigmoid_output->rows; i++) {
-    float temp[sigmoid_output->cols];
-    memset(temp, 0, sizeof(temp));
-
-    for (size_t k = 0; k < sigmoid_output->cols; k++) {
-      float val = tensor_get(sigmoid_output, i, k);
-      float grad = tensor_get(upstream_grad, i, k);
-      temp[k] = val * grad * (1.0f - val);
+      for (size_t k = 0; k < output->cols; k++) {
+        float prob = output->data[i * output->cols + k];
+        row[k] = prob / batch_size;
+      }
+      row[class_idx] -= 1.0f / batch_size;
+    } else {
+      // Target is one-hot: grad = softmax_output - target
+      for (size_t k = 0; k < output->cols; k++) {
+        float prob = output->data[i * output->cols + k];
+        float tgt = target->data[i * target->cols + k];
+        row[k] = (prob - tgt) / batch_size;
+      }
     }
 
-    tensor_append(ctx, dL_dZ, temp);
+    tensor_append(ctx, grad, row);
   }
 
-  return dL_dZ;
+  return grad;
 }
 
-Tensor *tanh_backward(TensorContext *ctx, Tensor *upstream_grad, Tensor *tanh_output) {
-  if (!upstream_grad || !tanh_output) {
+Tensor *mse_loss_backward(TensorContext *ctx, Tensor *prediction,
+                          Tensor *target) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!prediction || !target) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                     !upstream_grad ? "upstream_grad tensor is NULL"
-                                    : "tanh_output tensor is NULL");
+                     !prediction ? "prediction tensor is NULL"
+                                 : "target tensor is NULL");
     return NULL;
   }
 
-  if (!upstream_grad->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "upstream_grad tensor data is NULL");
+  if (!prediction->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "prediction tensor data is NULL");
     return NULL;
   }
 
-  if (!tanh_output->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "tanh_output tensor data is NULL");
+  if (!target->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "target tensor data is NULL");
     return NULL;
   }
 
-  Tensor *dL_dZ = tensor_new(ctx, tanh_output->cols);
-  if (!dL_dZ){
+  if (target->rows != prediction->rows) {
+    ctorch_set_error_fmt(
+        CTORCH_ERROR_LABEL_MISMATCH,
+        "target count (%zu) doesn't match prediction count (%zu)", target->rows,
+        prediction->rows);
+    return NULL;
+  }
+
+  int is_single_value = (target->cols == 1);
+  int is_multi_value = (target->cols == prediction->cols);
+
+  if (!is_single_value && !is_multi_value) {
+    ctorch_set_error_fmt(
+        CTORCH_ERROR_DIMENSION_MISMATCH,
+        "target cols (%zu) must be 1 (single value) or %zu (multi-value)",
+        target->cols, prediction->cols);
+    return NULL;
+  }
+
+  Tensor *grad = tensor_create(ctx, prediction->cols);
+  if (!grad) {
+    ctorch_set_error(
+        CTORCH_ERROR_OUT_OF_MEMORY,
+        "failed to allocate gradient tensor for mse_loss_backward");
+    return NULL;
+  }
+
+  float batch_size = (float)prediction->rows;
+
+  for (size_t i = 0; i < prediction->rows; i++) {
+    float row[prediction->cols];
+
+    if (is_single_value) {
+      // Target is single value: broadcast to all prediction columns
+      float tgt = target->data[i * target->cols];
+      for (size_t k = 0; k < prediction->cols; k++) {
+        float pred = prediction->data[i * prediction->cols + k];
+        row[k] = (pred - tgt) / batch_size;
+      }
+    } else {
+      // Target is multi-value: element-wise gradient
+      for (size_t k = 0; k < prediction->cols; k++) {
+        float pred = prediction->data[i * prediction->cols + k];
+        float tgt = target->data[i * target->cols + k];
+        row[k] = (pred - tgt) / batch_size;
+      }
+    }
+    tensor_append(ctx, grad, row);
+  }
+
+  return grad;
+}
+
+Tensor *relu_backward(TensorContext *ctx, Tensor *grad_output, Tensor *input) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!grad_output || !input) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
+                     !grad_output ? "grad_output tensor is NULL"
+                                  : "input tensor is NULL");
+    return NULL;
+  }
+
+  if (!grad_output->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "grad_output tensor data is NULL");
+    return NULL;
+  }
+
+  if (!input->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "input tensor data is NULL");
+    return NULL;
+  }
+
+  Tensor *grad = tensor_create(ctx, input->cols);
+  if (!grad) {
     ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for tanh backward");
+                     "failed to allocate gradient tensor for relu_backward");
     return NULL;
   }
 
-  for (size_t i = 0; i < tanh_output->rows; i++) {
-    float temp[tanh_output->cols];
-    memset(temp, 0, sizeof(temp));
+  for (size_t i = 0; i < input->rows; i++) {
+    float row[input->cols];
 
-    for (size_t k = 0; k < tanh_output->cols; k++) {
-      float upstream = tensor_get(upstream_grad, i, k);
-      float tahn_val = tensor_get(tanh_output, i, k);
+    for (size_t k = 0; k < input->cols; k++) {
+      float val = input->data[i * input->cols + k];
+      float upstream = grad_output->data[i * grad_output->cols + k];
+      row[k] = val > 0 ? upstream : 0;
+    }
+    tensor_append(ctx, grad, row);
+  }
 
-      temp[k] = upstream * (1.0f - powf(tahn_val, 2));
+  return grad;
+}
+
+Tensor *sigmoid_backward(TensorContext *ctx, Tensor *grad_output,
+                         Tensor *output) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!grad_output || !output) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
+                     !grad_output ? "grad_output tensor is NULL"
+                                  : "output tensor is NULL");
+    return NULL;
+  }
+
+  if (!grad_output->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "grad_output tensor data is NULL");
+    return NULL;
+  }
+
+  if (!output->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "output tensor data is NULL");
+    return NULL;
+  }
+
+  Tensor *grad = tensor_create(ctx, output->cols);
+  if (!grad) {
+    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
+                     "failed to allocate gradient tensor for sigmoid_backward");
+    return NULL;
+  }
+
+  for (size_t i = 0; i < output->rows; i++) {
+    float row[output->cols];
+
+    for (size_t k = 0; k < output->cols; k++) {
+      float sigmoid_val = output->data[i * output->cols + k];
+      float upstream = grad_output->data[i * grad_output->cols + k];
+      row[k] = sigmoid_val * upstream * (1.0f - sigmoid_val);
     }
 
-    tensor_append(ctx, dL_dZ, temp);
+    tensor_append(ctx, grad, row);
   }
 
-  return dL_dZ;
+  return grad;
 }
 
-Tensor *weight_gradient(TensorContext *ctx, Tensor *inputs, Tensor *upstream_grad){
-  if (!inputs || !upstream_grad) {
+Tensor *tanh_backward(TensorContext *ctx, Tensor *grad_output, Tensor *output) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!grad_output || !output) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                     !inputs ? "inputs tensor is NULL"
-                             : "upstream_grad tensor is NULL");
+                     !grad_output ? "grad_output tensor is NULL"
+                                  : "output tensor is NULL");
     return NULL;
   }
 
-  if (!inputs->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "inputs tensor data is NULL");
+  if (!grad_output->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "grad_output tensor data is NULL");
     return NULL;
   }
 
-  if (!upstream_grad->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "upstream_grad tensor data is NULL");
+  if (!output->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "output tensor data is NULL");
     return NULL;
   }
 
-  if (inputs->rows != upstream_grad->rows) {
+  Tensor *grad = tensor_create(ctx, output->cols);
+  if (!grad) {
+    ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
+                     "failed to allocate gradient tensor for tanh_backward");
+    return NULL;
+  }
+
+  for (size_t i = 0; i < output->rows; i++) {
+    float row[output->cols];
+
+    for (size_t k = 0; k < output->cols; k++) {
+      float upstream = grad_output->data[i * grad_output->cols + k];
+      float tanh_val = output->data[i * output->cols + k];
+      row[k] = upstream * (1.0f - tanh_val * tanh_val);
+    }
+
+    tensor_append(ctx, grad, row);
+  }
+
+  return grad;
+}
+
+Tensor *weight_gradient(TensorContext *ctx, Tensor *input,
+                        Tensor *grad_output) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!input || !grad_output) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
+                     !input ? "input tensor is NULL"
+                            : "grad_output tensor is NULL");
+    return NULL;
+  }
+
+  if (!input->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "input tensor data is NULL");
+    return NULL;
+  }
+
+  if (!grad_output->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "grad_output tensor data is NULL");
+    return NULL;
+  }
+
+  if (input->rows != grad_output->rows) {
     ctorch_set_error_fmt(CTORCH_ERROR_DIMENSION_MISMATCH,
-                         "batch size mismatch (inputs: %zu rows, upstream_grad: %zu rows)",
-                         inputs->rows, upstream_grad->rows);
+                         "batch size mismatch (input: %zu rows, grad_output: "
+                         "%zu rows)",
+                         input->rows, grad_output->rows);
     return NULL;
   }
 
-  size_t dim_in = inputs->cols;
-  size_t dim_out = upstream_grad->cols;
-  size_t N = inputs->rows;
+  size_t in_features = input->cols;
+  size_t out_features = grad_output->cols;
+  size_t batch_size = input->rows;
 
-  Tensor *dL_dW = tensor_new(ctx, dim_out);
-  if (!dL_dW){
+  Tensor *grad_weight = tensor_create(ctx, out_features);
+  if (!grad_weight) {
     ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for affine_transform backward");
+                     "failed to allocate gradient tensor for weight_gradient");
     return NULL;
   }
 
+  for (size_t j = 0; j < in_features; j++) {
+    float row[out_features];
 
-  for(size_t j = 0; j < dim_in; j++){
-    float temp[dim_out];
-    memset(temp, 0, sizeof(temp));
-
-    for(size_t k = 0; k < dim_out; k++){
+    for (size_t k = 0; k < out_features; k++) {
       float sum = 0.0f;
-      for(size_t i = 0; i < N; i++){
-        float x = tensor_get(inputs, i, j);
-        float grad = tensor_get(upstream_grad, i, k);
-
+      for (size_t i = 0; i < batch_size; i++) {
+        float x = input->data[i * input->cols + j];
+        float grad = grad_output->data[i * grad_output->cols + k];
         sum += x * grad;
       }
-      temp[k] = sum;
+      row[k] = sum;
     }
-    tensor_append(ctx, dL_dW, temp);
+    tensor_append(ctx, grad_weight, row);
   }
 
-  return dL_dW;
+  return grad_weight;
 }
 
-Tensor *bias_gradient(TensorContext *ctx, Tensor *upstream_grad) {
-  if (!upstream_grad) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "upstream_grad tensor is NULL");
+Tensor *bias_gradient(TensorContext *ctx, Tensor *grad_output) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
     return NULL;
   }
 
-  if (!upstream_grad->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "upstream_grad tensor data is NULL");
+  if (!grad_output) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "grad_output tensor is NULL");
     return NULL;
   }
 
-  Tensor *dL_db = tensor_new(ctx, upstream_grad->cols);
-  if (!dL_db){
+  if (!grad_output->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "grad_output tensor data is NULL");
+    return NULL;
+  }
+
+  Tensor *grad_bias = tensor_create(ctx, grad_output->cols);
+  if (!grad_bias) {
     ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for bias_gradient");
+                     "failed to allocate gradient tensor for bias_gradient");
     return NULL;
   }
 
-  // Sum along axis 0 (batch dimension) to get (1, D_out) tensor
-  float temp[upstream_grad->cols];
-  memset(temp, 0, sizeof(temp));
+  // Sum along axis 0 (batch dimension) to get (1, out_features) tensor
+  float row[grad_output->cols];
 
-  for(size_t k = 0; k < upstream_grad->cols; k++){
+  for (size_t k = 0; k < grad_output->cols; k++) {
     float sum = 0.0f;
-    for(size_t i = 0; i < upstream_grad->rows; i++){
-      sum += tensor_get(upstream_grad, i, k);
+    for (size_t i = 0; i < grad_output->rows; i++) {
+      sum += grad_output->data[i * grad_output->cols + k];
     }
-    temp[k] = sum;
+    row[k] = sum;
   }
-  tensor_append(ctx, dL_db, temp);
+  tensor_append(ctx, grad_bias, row);
 
-  return dL_db;
+  return grad_bias;
 }
 
-Tensor *input_gradient(TensorContext *ctx, Tensor *upstream_grad, Tensor *weights){
-  if (!upstream_grad || !weights) {
+Tensor *input_gradient(TensorContext *ctx, Tensor *grad_output,
+                       Tensor *weight) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (!grad_output || !weight) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                      !upstream_grad ? "upstream_grad tensor is NULL"
-                                     : "weights tensor is NULL");
+                     !grad_output ? "grad_output tensor is NULL"
+                                  : "weight tensor is NULL");
     return NULL;
   }
 
-  if (!upstream_grad->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "upstream_grad tensor data is NULL");
+  if (!grad_output->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "grad_output tensor data is NULL");
     return NULL;
   }
 
-  if (!weights->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "weights tensor data is NULL");
+  if (!weight->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "weight tensor data is NULL");
     return NULL;
   }
 
-  size_t N = upstream_grad->rows;
-  size_t dim_out = upstream_grad->cols;
-  size_t dim_in = weights->rows;
+  size_t batch_size = grad_output->rows;
+  size_t out_features = grad_output->cols;
+  size_t in_features = weight->rows;
 
-  // Check: upstream_grad->cols (D_out) must match weights->cols (D_out)
-  if (dim_out != weights->cols) {
-    ctorch_set_error_fmt(CTORCH_ERROR_DIMENSION_MISMATCH,
-                         "dimension mismatch (upstream_grad: %zu cols, weights: %zu cols)",
-                         dim_out, weights->cols);
+  // Check: grad_output->cols (out_features) must match weight->cols
+  // (out_features)
+  if (out_features != weight->cols) {
+    ctorch_set_error_fmt(
+        CTORCH_ERROR_DIMENSION_MISMATCH,
+        "dimension mismatch (grad_output: %zu cols, weight: %zu cols)",
+        out_features, weight->cols);
     return NULL;
   }
 
-  Tensor *dL_dX = tensor_new(ctx, dim_in);
-  if (!dL_dX){
+  Tensor *grad_input = tensor_create(ctx, in_features);
+  if (!grad_input) {
     ctorch_set_error(CTORCH_ERROR_OUT_OF_MEMORY,
-                     "failed to allocate temporary tensor for input_gradient");
+                     "failed to allocate gradient tensor for input_gradient");
     return NULL;
   }
 
-  for(size_t i = 0; i < N; i++){
-    float temp[dim_in];
-    memset(temp, 0, sizeof(temp));
+  for (size_t i = 0; i < batch_size; i++) {
+    float row[in_features];
 
-    for(size_t j = 0; j < dim_in; j++){
+    for (size_t j = 0; j < in_features; j++) {
       float sum = 0.0f;
-      for(size_t k = 0; k < dim_out; k++){
-        sum += tensor_get(upstream_grad, i, k) * tensor_get(weights, j, k);
+      for (size_t k = 0; k < out_features; k++) {
+        sum += grad_output->data[i * grad_output->cols + k] *
+               weight->data[j * weight->cols + k];
       }
-
-      temp[j] = sum;
+      row[j] = sum;
     }
-    tensor_append(ctx, dL_dX, temp);
+    tensor_append(ctx, grad_input, row);
   }
 
-  return dL_dX;
+  return grad_input;
 }

@@ -94,11 +94,11 @@ Arena *arena_create(size_t default_block_size);
  * The arena grows by allocating new blocks when needed. Allocations never
  * return memory to the system until `arena_free()` is called.
  *
- * @param arena      Pointer to a valid Arena instance.
- * @param size       Number of bytes to allocate.
- * @param alignment  Alignment requirement (must be power of two).
+ * @param arena      Pointer to a valid Arena instance
+ * @param size       Number of bytes to allocate
+ * @param alignment  Alignment requirement (must be power of two)
  *
- * @return Pointer to allocated memory, or NULL on failure.
+ * @return Pointer to allocated memory, or NULL on failure
  */
 void *arena_alloc(Arena *arena, size_t size, size_t alignment);
 
@@ -113,7 +113,7 @@ void *arena_alloc(Arena *arena, size_t size, size_t alignment);
  * - The implementation resets **all blocks**.
  * - A different design may free all but the first block.
  *
- * @param arena  Pointer to an Arena instance.
+ * @param arena  Pointer to an Arena instance
  */
 void arena_reset(Arena *arena);
 
@@ -123,7 +123,7 @@ void arena_reset(Arena *arena);
  * This frees all blocks and the Arena structure itself. After this call,
  * the arena pointer must not be used.
  *
- * @param arena  Pointer to an Arena instance.
+ * @param arena  Pointer to an Arena instance
  */
 void arena_free(Arena *arena);
 
@@ -138,7 +138,8 @@ void arena_free(Arena *arena);
  * Supports nested checkpoints - multiple checkpoints can be saved and
  * restored independently.
  *
- * @param arena Pointer to Arena instance
+ * @param arena  Pointer to Arena instance
+ *
  * @return Checkpoint representing current state
  *
  * @example Basic usage:
@@ -168,8 +169,8 @@ ArenaCheckpoint arena_checkpoint(Arena *arena);
  * behavior
  * - Debug builds include validation checks via assertions
  *
- * @param arena Pointer to Arena instance
- * @param checkpoint Previously saved checkpoint from arena_checkpoint()
+ * @param arena       Pointer to Arena instance
+ * @param checkpoint  Previously saved checkpoint from arena_checkpoint()
  */
 void arena_restore(Arena *arena, ArenaCheckpoint checkpoint);
 
@@ -221,10 +222,10 @@ struct Arena {
  *   - If pointer is already aligned → padding = 0
  *   - Otherwise → padding = minimal offset to align
  *
- * @param ptr        Pointer value as integer.
- * @param alignment  Required alignment (must be power of two).
+ * @param ptr        Pointer value as integer
+ * @param alignment  Required alignment (must be power of two)
  *
- * @return Number of bytes of padding needed.
+ * @return Number of bytes of padding needed
  */
 static size_t align_up(uintptr_t ptr, size_t alignment) {
   return (alignment - (ptr % alignment)) % alignment;

@@ -20,22 +20,36 @@ typedef struct {
   Tensor **items;
 } TensorArr;
 
+struct OptimizerState {
+  Tensor *v_weights;
+  Tensor *v_biases;
+  Tensor *m_weights;
+  Tensor *m_biases;
+  int t;
+};
+
+typedef struct {
+  size_t capacity;
+  size_t size;
+  OptimizerState **items;
+} OptimizerStateArr;
+
 struct DenseContext {
   TensorContext *tensor_ctx;
   size_t input_size;
   DenseArr *hidden_layers;
-  TensorArr *layer_inputs; // Cached inputs to each layer (for weight_gradient)
-  TensorArr *
-      pre_activations; // Cached pre-activation values (for activation backward)
+  TensorArr *layer_inputs;
+  TensorArr *pre_activations;
+  OptimizerStateArr *optimizer_state;
   Tensor *output;
   Arena *arena;
 };
 
-DenseContext *dense_init(size_t input_size) {
-  if (input_size == 0) {
+DenseContext *dense_init(size_t in_features) {
+  if (in_features == 0) {
     ctorch_set_error_fmt(CTORCH_ERROR_INVALID_SHAPE,
-                         "input size must be positive (received: %zu)",
-                         input_size);
+                         "in_features must be positive (received: %zu)",
+                         in_features);
     return NULL;
   }
 
@@ -56,7 +70,7 @@ DenseContext *dense_init(size_t input_size) {
     return NULL;
   }
 
-  ctx->tensor_ctx = tensor_create();
+  ctx->tensor_ctx = tensor_init();
   if (!ctx->tensor_ctx) {
     ctorch_set_error(CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
                      "failed to create tensor context");
@@ -117,20 +131,37 @@ DenseContext *dense_init(size_t input_size) {
     free(ctx);
     return NULL;
   }
+
   pre_activations->capacity = 0;
   pre_activations->size = 0;
   pre_activations->items = NULL;
 
+  OptimizerStateArr *optimizer_state = arena_alloc(
+      arena, sizeof(OptimizerStateArr), ARENA_ALIGNOF(OptimizerStateArr));
+  if (!optimizer_state) {
+    ctorch_set_error(CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
+                     "failed to allocate momentum states array");
+    tensor_free(ctx->tensor_ctx);
+    arena_free(arena);
+    free(ctx);
+    return NULL;
+  }
+  optimizer_state->capacity = 0;
+  optimizer_state->size = 0;
+  optimizer_state->items = NULL;
+
   ctx->output = NULL;
-  ctx->input_size = input_size;
+  ctx->input_size = in_features;
   ctx->hidden_layers = dense_arr;
   ctx->layer_inputs = layer_inputs;
   ctx->pre_activations = pre_activations;
+  ctx->optimizer_state = optimizer_state;
   ctx->arena = arena;
   return ctx;
 }
 
-int dense_create(DenseContext *ctx, size_t output_size, Activation activation) {
+int dense_create(DenseContext *ctx, size_t out_features,
+                 Activation activation) {
   if (!ctx) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "dense context is NULL");
     return CTORCH_ERROR_NULL_PARAMETER;
@@ -141,15 +172,15 @@ int dense_create(DenseContext *ctx, size_t output_size, Activation activation) {
     return CTORCH_ERROR_NULL_PARAMETER;
   }
 
-  if (output_size == 0) {
+  if (out_features == 0) {
     ctorch_set_error_fmt(CTORCH_ERROR_INVALID_SHAPE,
-                         "layer dimensions must be positive (output_size: %zu)",
-                         output_size);
+                         "out_features must be positive (received: %zu)",
+                         out_features);
     return CTORCH_ERROR_INVALID_SHAPE;
   }
 
-  Dense *dense = arena_alloc(ctx->arena, sizeof(Dense), ARENA_ALIGNOF(Dense));
-  if (!dense) {
+  Dense *layer = arena_alloc(ctx->arena, sizeof(Dense), ARENA_ALIGNOF(Dense));
+  if (!layer) {
     ctorch_set_error_fmt(
         CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
         "failed to allocate layer structure (requested size: %zu bytes)",
@@ -157,21 +188,48 @@ int dense_create(DenseContext *ctx, size_t output_size, Activation activation) {
     return CTORCH_ERROR_ARENA_ALLOCATION_FAILED;
   }
 
-  dense->weights = tensor_randn(ctx->tensor_ctx, ctx->input_size, output_size);
-  if (!dense->weights)
+  switch (activation) {
+  case ReLU:
+    layer->weight =
+        tensor_randn_he(ctx->tensor_ctx, ctx->input_size, out_features);
+    break;
+  case Sigmoid:
+  case Tanh:
+    layer->weight =
+        tensor_randn_xavier(ctx->tensor_ctx, ctx->input_size, out_features);
+    break;
+  case Linear:
+    layer->weight =
+        tensor_randn_xavier(ctx->tensor_ctx, ctx->input_size, out_features);
+    break;
+  default:
+    layer->weight =
+        tensor_randn(ctx->tensor_ctx, ctx->input_size, out_features);
+    break;
+  }
+
+  if (!layer->weight)
     return CTORCH_ERROR_INVALID;
 
-  dense->biases = tensor_randn(ctx->tensor_ctx, 1, output_size);
-  if (!dense->biases)
+  layer->bias = tensor_zeros(ctx->tensor_ctx, 1, out_features);
+  if (!layer->bias)
     return CTORCH_ERROR_INVALID;
 
-  dense->activation = activation;
-  ctx->input_size = output_size;
-  array_append(ctx->arena, ctx->hidden_layers, dense);
+  layer->activation = activation;
+
+  // Create momentum state for this layer
+  OptimizerState *m_state =
+      optimizer_state_init(ctx, ctx->input_size, out_features);
+  if (!m_state)
+    return CTORCH_ERROR_ARENA_ALLOCATION_FAILED;
+
+  array_append(ctx->arena, ctx->optimizer_state, m_state);
+  array_append(ctx->arena, ctx->hidden_layers, layer);
+  ctx->input_size = out_features;
   return 0;
 }
 
-Tensor *dense_forward(DenseContext *ctx, Tensor *inputs) {
+Tensor *dense_forward(DenseContext *ctx, Tensor *input) {
   if (!ctx) {
     return NULL;
   }
@@ -185,7 +243,7 @@ Tensor *dense_forward(DenseContext *ctx, Tensor *inputs) {
     return NULL;
   }
 
-  if (!inputs) {
+  if (!input) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "input tensor is NULL");
     return NULL;
   }
@@ -194,59 +252,57 @@ Tensor *dense_forward(DenseContext *ctx, Tensor *inputs) {
   ctx->layer_inputs->size = 0;
   ctx->pre_activations->size = 0;
 
-  Tensor *layer_input = inputs;
-  Tensor *af = NULL;
+  Tensor *layer_input = input;
+  Tensor *output = NULL;
 
   for (size_t i = 0; i < ctx->hidden_layers->size; i++) {
-    Dense *current_dense = ctx->hidden_layers->items[i];
+    Dense *layer = ctx->hidden_layers->items[i];
 
     // Cache this layer's input for backward pass
     array_append(ctx->arena, ctx->layer_inputs, layer_input);
 
     // Get the bias row (all bias values for this layer)
-    float *bias =
-        tensor_slice(ctx->tensor_ctx, current_dense->biases, 0, AxisRow);
-    if (!bias) {
+    float *bias_values = tensor_slice(ctx->tensor_ctx, layer->bias, 0, AxisRow);
+    if (!bias_values) {
       ctorch_set_error(CTORCH_ERROR_NULL_DATA, "failed to extract bias values");
       return NULL;
     }
 
-    // Apply affine transformation for this layer
-    af = affine_transform(ctx->tensor_ctx, layer_input, current_dense->weights,
-                          bias);
-    if (!af) {
+    // Apply linear transformation for this layer
+    output = linear(ctx->tensor_ctx, layer_input, layer->weight, bias_values);
+    if (!output) {
       return NULL;
     }
 
     // Cache layer output for backward pass (activation functions modify
     // in-place, so after forward pass this will contain post-activation values)
-    array_append(ctx->arena, ctx->pre_activations, af);
+    array_append(ctx->arena, ctx->pre_activations, output);
 
     // Apply this layer's activation function
-    switch (current_dense->activation) {
+    switch (layer->activation) {
     case ReLU:
-      relu(af);
+      relu(output);
       break;
     case Sigmoid:
-      sigmoid(af);
+      sigmoid(output);
       break;
     case Softmax:
-      softmax(af);
+      softmax(output);
       break;
     case Tanh:
-      tanhh(af);
+      tanh_(output);
       break;
     default:
       break;
     }
 
-    layer_input = af;
+    layer_input = output;
 
     // Cache final output
-    ctx->output = af;
+    ctx->output = output;
   }
 
-  return af;
+  return output;
 }
 
 void dense_free(DenseContext *ctx) {
@@ -262,10 +318,234 @@ void dense_free(DenseContext *ctx) {
   free(ctx);
 }
 
-int dense_backward(DenseContext *ctx, float learning_rate, Tensor *loss_grad) {
-  if (!ctx || !loss_grad) {
+int sgd(float lr, Dense *layer, Tensor *dw, Tensor *db) {
+  if (!layer || !dw || !db) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "layer, dw, or db is NULL");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
+
+  if (dw->rows != layer->weight->rows || dw->cols != layer->weight->cols) {
+    ctorch_set_error(CTORCH_ERROR_DIMENSION_MISMATCH, "dw shape mismatch");
+    return CTORCH_ERROR_DIMENSION_MISMATCH;
+  }
+
+  float *w = layer->weight->data;
+  float *gW = dw->data;
+
+  size_t size = layer->weight->rows * layer->weight->cols;
+  for (size_t i = 0; i < size; i++)
+    w[i] -= lr * gW[i];
+
+  for (size_t i = 0; i < layer->bias->cols; i++)
+    layer->bias->data[i] -= lr * db->data[i];
+
+  return 0;
+}
+
+OptimizerState *optimizer_state_init(DenseContext *ctx, size_t in_features,
+                                     size_t out_features) {
+  if (!ctx) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
+    return NULL;
+  }
+
+  if (in_features == 0 || out_features == 0) {
+    ctorch_set_error_fmt(CTORCH_ERROR_INVALID_SHAPE,
+                         "dimensions must be positive (received: %zux%zu)",
+                         in_features, out_features);
+    return NULL;
+  }
+
+  OptimizerState *state = arena_alloc(ctx->arena, sizeof(OptimizerState),
+                                      ARENA_ALIGNOF(OptimizerState));
+  if (!state) {
+    ctorch_set_error(CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
+                     "failed to allocate optimizer state");
+    return NULL;
+  }
+
+  // v_weights shape: (in_features × out_features) - matches layer->weight
+  state->v_weights = tensor_zeros(ctx->tensor_ctx, in_features, out_features);
+  if (!state->v_weights) {
+    free(state);
+    return NULL;
+  }
+
+  // v_biases shape: (1 × out_features) - matches layer->bias
+  state->v_biases = tensor_zeros(ctx->tensor_ctx, 1, out_features);
+  if (!state->v_biases) {
+    free(state);
+    return NULL;
+  }
+
+  state->m_weights = tensor_zeros(ctx->tensor_ctx, in_features, out_features);
+  if (!state->m_weights) {
+    free(state);
+    return NULL;
+  }
+
+  state->m_biases = tensor_zeros(ctx->tensor_ctx, 1, out_features);
+  if (!state->m_biases) {
+    free(state);
+    return NULL;
+  }
+
+  state->t = 0;
+
+  return state;
+}
+
+int momentum(OptimizerState *momentum_state, float lr, Dense *layer, Tensor *dw,
+             Tensor *db) {
+  if (!momentum_state || !layer || !dw || !db) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, momentum_state
+                                                      ? "Momentum state is NULL"
+                                                  : layer ? "Layer is NULL"
+                                                  : dw    ? "dw is NULL"
+                                                  : db    ? "db is NULL"
+                                                          : "Unknown error");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
+
+  if (dw->rows != layer->weight->rows || dw->cols != layer->weight->cols) {
+    ctorch_set_error(CTORCH_ERROR_DIMENSION_MISMATCH, "dw shape mismatch");
+    return CTORCH_ERROR_DIMENSION_MISMATCH;
+  }
+
+  float beta = 0.9f;
+  float beta_t = 1.0f - beta;
+
+  size_t w_size = layer->weight->rows * layer->weight->cols;
+  for (size_t i = 0; i < w_size; i++) {
+    float g = dw->data[i];
+
+    momentum_state->v_weights->data[i] =
+        beta * momentum_state->v_weights->data[i] + beta_t * g;
+
+    layer->weight->data[i] -= lr * momentum_state->v_weights->data[i];
+  }
+
+  for (size_t i = 0; i < layer->bias->cols; i++) {
+    float g = db->data[i];
+
+    momentum_state->v_biases->data[i] =
+        beta * momentum_state->v_biases->data[i] + beta_t * g;
+
+    layer->bias->data[i] -= lr * momentum_state->v_biases->data[i];
+  }
+
+  return 0;
+}
+
+int rmsprop(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
+            Tensor *db) {
+  if (!optimizer_state || !layer || !dw || !db) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                     "context or loss gradient is NULL");
+                     optimizer_state ? "Optimizer state is NULL"
+                     : layer         ? "Layer is NULL"
+                     : dw            ? "dw is NULL"
+                     : db            ? "db is NULL"
+                                     : "Unknown error");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
+
+  if (dw->rows != layer->weight->rows || dw->cols != layer->weight->cols) {
+    ctorch_set_error(CTORCH_ERROR_DIMENSION_MISMATCH, "dw shape mismatch");
+    return CTORCH_ERROR_DIMENSION_MISMATCH;
+  }
+
+  float beta = 0.999f;
+  float eps = 1e-8f;
+
+  size_t w_size = layer->weight->rows * layer->weight->cols;
+  for (size_t i = 0; i < w_size; i++) {
+    float g = dw->data[i];
+
+    optimizer_state->v_weights->data[i] =
+        beta * optimizer_state->v_weights->data[i] + (1 - beta) * powf(g, 2);
+
+    layer->weight->data[i] -=
+        lr * g / (sqrtf(optimizer_state->v_weights->data[i]) + eps);
+  }
+
+  for (size_t i = 0; i < layer->bias->cols; i++) {
+    float g = db->data[i];
+
+    optimizer_state->v_biases->data[i] =
+        beta * optimizer_state->v_biases->data[i] + (1 - beta) * powf(g, 2);
+
+    layer->bias->data[i] -=
+        lr * g / (sqrtf(optimizer_state->v_biases->data[i]) + eps);
+  }
+
+  return 0;
+}
+
+int adam(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
+         Tensor *db) {
+  if (!optimizer_state || !layer || !dw || !db) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
+                     optimizer_state ? "Optimizer state is NULL"
+                     : layer         ? "Layer is NULL"
+                     : dw            ? "dw is NULL"
+                     : db            ? "db is NULL"
+                                     : "Unknown error");
+    return CTORCH_ERROR_NULL_PARAMETER;
+  }
+
+  if (dw->rows != layer->weight->rows || dw->cols != layer->weight->cols) {
+    ctorch_set_error(CTORCH_ERROR_DIMENSION_MISMATCH, "dw shape mismatch");
+    return CTORCH_ERROR_DIMENSION_MISMATCH;
+  }
+
+  optimizer_state->t++;
+
+  float beta1 = 0.9f;
+  float beta2 = 0.999f;
+  float eps = 1e-8f;
+
+  int t = optimizer_state->t;
+  float beta1_t = powf(beta1, t);
+  float beta2_t = powf(beta2, t);
+
+  size_t w_size = layer->weight->rows * layer->weight->cols;
+  for (size_t i = 0; i < w_size; i++) {
+    float g = dw->data[i];
+
+    optimizer_state->m_weights->data[i] =
+        beta1 * optimizer_state->m_weights->data[i] + (1 - beta1) * g;
+
+    optimizer_state->v_weights->data[i] =
+        beta2 * optimizer_state->v_weights->data[i] + (1 - beta2) * powf(g, 2);
+
+    float m_hat = optimizer_state->m_weights->data[i] / (1 - beta1_t);
+    float v_hat = optimizer_state->v_weights->data[i] / (1 - beta2_t);
+
+    layer->weight->data[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+  }
+
+  for (size_t i = 0; i < layer->bias->cols; i++) {
+    float g = db->data[i];
+    optimizer_state->m_biases->data[i] =
+        beta1 * optimizer_state->m_biases->data[i] + (1 - beta1) * g;
+
+    optimizer_state->v_biases->data[i] =
+        beta2 * optimizer_state->v_biases->data[i] + (1 - beta2) * powf(g, 2);
+
+    float m_hat = optimizer_state->m_biases->data[i] / (1 - beta1_t);
+    float v_hat = optimizer_state->v_biases->data[i] / (1 - beta2_t);
+
+    layer->bias->data[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+  }
+
+  return 0;
+}
+
+int dense_backward(DenseContext *ctx, Tensor *grad_output, float lr,
+                   OptimizerType optimizer) {
+  if (!ctx || !grad_output) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
+                     "context or grad_output is NULL");
     return CTORCH_ERROR_NULL_PARAMETER;
   }
 
@@ -279,8 +559,8 @@ int dense_backward(DenseContext *ctx, float learning_rate, Tensor *loss_grad) {
     return CTORCH_ERROR_NULL_PARAMETER;
   }
 
-  if (!loss_grad->data) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "loss gradient data is NULL");
+  if (!grad_output->data) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "grad_output data is NULL");
     return CTORCH_ERROR_NULL_DATA;
   }
 
@@ -291,7 +571,7 @@ int dense_backward(DenseContext *ctx, float learning_rate, Tensor *loss_grad) {
   }
 
   // Current gradient flowing backward (dL/dY for current layer)
-  Tensor *upstream_grad = loss_grad;
+  Tensor *upstream = grad_output;
 
   // Iterate from last layer to first (backpropagation)
   for (size_t idx = ctx->hidden_layers->size; idx > 0; idx--) {
@@ -301,25 +581,22 @@ int dense_backward(DenseContext *ctx, float learning_rate, Tensor *loss_grad) {
     Tensor *layer_output =
         ctx->pre_activations->items[i]; // Post-activation values
 
-    // Step 1: Compute gradient through activation function
     // For Softmax with cross-entropy, the combined gradient is already computed
     // by cross_entropy_backward, so we skip activation backward for Softmax
-    Tensor *activation_grad = upstream_grad;
+    Tensor *activation_grad = upstream;
     if (layer->activation != Softmax) {
       switch (layer->activation) {
       case ReLU:
-        // relu_backward works with post-activation values since ReLU(x)>0 iff
-        // x>0
         activation_grad =
-            relu_backward(ctx->tensor_ctx, upstream_grad, layer_output);
+            relu_backward(ctx->tensor_ctx, upstream, layer_output);
         break;
       case Sigmoid:
         activation_grad =
-            sigmoid_backward(ctx->tensor_ctx, upstream_grad, layer_output);
+            sigmoid_backward(ctx->tensor_ctx, upstream, layer_output);
         break;
       case Tanh:
         activation_grad =
-            tanh_backward(ctx->tensor_ctx, upstream_grad, layer_output);
+            tanh_backward(ctx->tensor_ctx, upstream, layer_output);
         break;
       default:
         break;
@@ -329,47 +606,50 @@ int dense_backward(DenseContext *ctx, float learning_rate, Tensor *loss_grad) {
       }
     }
 
-    // Step 2: Compute weight gradient: dL/dW = X^T * dL/dZ
+    // Compute weight gradient: dL/dW = input^T @ activation_grad
     Tensor *dw = weight_gradient(ctx->tensor_ctx, layer_input, activation_grad);
     if (!dw) {
       return CTORCH_ERROR_INVALID;
     }
 
-    // Step 3: Compute bias gradient: dL/db = sum(dL/dZ, axis=0)
+    // Compute bias gradient: dL/db = sum(activation_grad, axis=0)
     Tensor *db = bias_gradient(ctx->tensor_ctx, activation_grad);
     if (!db) {
       return CTORCH_ERROR_INVALID;
     }
 
-    // Step 4: Compute input gradient for next iteration: dL/dX = dL/dZ * W^T
+    // Compute input gradient: dL/dX = activation_grad @ weight^T
     Tensor *dx =
-        input_gradient(ctx->tensor_ctx, activation_grad, layer->weights);
+        input_gradient(ctx->tensor_ctx, activation_grad, layer->weight);
     if (!dx) {
       return CTORCH_ERROR_INVALID;
     }
 
-    // Step 5: Update weights: W = W - lr * dL/dW
-    for (size_t j = 0; j < layer->weights->rows; j++) {
-      for (size_t k = 0; k < layer->weights->cols; k++) {
-        size_t weight_idx = j * layer->weights->cols + k;
-        layer->weights->data[weight_idx] -=
-            learning_rate * tensor_get(dw, j, k);
-      }
-    }
-
-    // Step 6: Update biases: b = b - lr * dL/db
-    for (size_t k = 0; k < layer->biases->cols; k++) {
-      layer->biases->data[k] -= learning_rate * tensor_get(db, 0, k);
+    switch (optimizer) {
+    case Momentum:
+      momentum(ctx->optimizer_state->items[i], lr, layer, dw, db);
+      break;
+    case SGD:
+      sgd(lr, layer, dw, db);
+      break;
+    case RMSprop:
+      rmsprop(ctx->optimizer_state->items[i], lr, layer, dw, db);
+      break;
+    case Adam:
+      adam(ctx->optimizer_state->items[i], lr, layer, dw, db);
+      break;
+    default:
+      break;
     }
 
     // Propagate gradient to previous layer
-    upstream_grad = dx;
+    upstream = dx;
   }
 
   return 0;
 }
 
-Tensor *predict(DenseContext *ctx, Tensor *inputs) {
+Tensor *predict(DenseContext *ctx, Tensor *input) {
   if (!ctx) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
     return NULL;
@@ -380,40 +660,40 @@ Tensor *predict(DenseContext *ctx, Tensor *inputs) {
     return NULL;
   }
 
-  if (!inputs) {
+  if (!input) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "input tensor is NULL");
     return NULL;
   }
 
-  Tensor *output = dense_forward(ctx, inputs);
+  Tensor *output = dense_forward(ctx, input);
   if (!output) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "Predict failed");
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "predict failed");
     return NULL;
   }
 
-  Tensor *p = tensor_new(ctx->tensor_ctx, 1);
-  if (!p) {
-    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "Predict failed");
+  Tensor *predictions = tensor_create(ctx->tensor_ctx, 1);
+  if (!predictions) {
+    ctorch_set_error(CTORCH_ERROR_NULL_DATA, "predict failed");
     return NULL;
   }
 
   for (size_t i = 0; i < output->rows; i++) {
-    float pred_class[1] = {0.0f};
+    float pred_idx[1] = {0.0f};
     float max_prob = -1.0f;
     for (size_t j = 0; j < output->cols; j++) {
       float prob = tensor_get(output, i, j);
       if (prob > max_prob) {
         max_prob = prob;
-        pred_class[0] = (float)j;
+        pred_idx[0] = (float)j;
       }
     }
-    tensor_append(ctx->tensor_ctx, p, pred_class);
+    tensor_append(ctx->tensor_ctx, predictions, pred_idx);
   }
 
-  return p;
+  return predictions;
 }
 
-float accuracy(DenseContext *ctx, Tensor *pred_class, Tensor *true_class) {
+float accuracy(DenseContext *ctx, Tensor *predictions, Tensor *targets) {
   if (!ctx) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
     return NAN;
@@ -424,50 +704,50 @@ float accuracy(DenseContext *ctx, Tensor *pred_class, Tensor *true_class) {
     return NAN;
   }
 
-  if (!pred_class) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "prediction class is NULL");
+  if (!predictions) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "predictions tensor is NULL");
     return NAN;
   }
 
-  if (!true_class) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "true class is NULL");
+  if (!targets) {
+    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "targets tensor is NULL");
     return NAN;
   }
 
-  if (pred_class->rows != true_class->rows) {
+  if (predictions->rows != targets->rows) {
     ctorch_set_error_fmt(CTORCH_ERROR_DIMENSION_MISMATCH,
-                         "prediction and true class tensors must have the "
+                         "predictions and targets must have the "
                          "same number of rows (received: %zux%zu vs %zux%zu)",
-                         pred_class->rows, pred_class->cols, true_class->rows,
-                         true_class->cols);
+                         predictions->rows, predictions->cols, targets->rows,
+                         targets->cols);
     return NAN;
   }
 
   int correct = 0;
-  bool is_one_hot = true_class->cols > 1;
+  bool is_one_hot = targets->cols > 1;
 
-  for (size_t i = 0; i < pred_class->rows; i++) {
-    float pred = tensor_get(pred_class, i, 0);
-    float t;
+  for (size_t i = 0; i < predictions->rows; i++) {
+    float pred = tensor_get(predictions, i, 0);
+    float target_class;
 
     if (is_one_hot) {
       // Find argmax of one-hot encoded row
       float max_val = -1.0f;
-      t = 0.0f;
-      for (size_t j = 0; j < true_class->cols; j++) {
-        float val = tensor_get(true_class, i, j);
+      target_class = 0.0f;
+      for (size_t j = 0; j < targets->cols; j++) {
+        float val = tensor_get(targets, i, j);
         if (val > max_val) {
           max_val = val;
-          t = (float)j;
+          target_class = (float)j;
         }
       }
     } else {
-      t = tensor_get(true_class, i, 0);
+      target_class = tensor_get(targets, i, 0);
     }
 
-    if (pred == t)
+    if (pred == target_class)
       correct++;
   }
 
-  return (float)correct / (float)pred_class->rows;
+  return (float)correct / (float)predictions->rows;
 }
