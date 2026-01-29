@@ -3,13 +3,74 @@
 
 #include "tensor.h"
 
+/**
+ * @brief Activation function types for neural network layers.
+ *
+ * Defines the nonlinear transformations applied after linear layer operations.
+ * Each activation has different properties suited for different use cases:
+ *
+ *   - Linear: Identity function (no activation). Used for regression outputs.
+ *   - ReLU: f(x) = max(0, x). Most common for hidden layers, prevents vanishing
+ *     gradients.
+ *   - Sigmoid: f(x) = 1/(1+e^-x). Squashes to [0,1], used for binary
+ *     classification.
+ *   - Softmax: f(x_i) = e^x_i / Σe^x_j. Normalizes to probability distribution,
+ *     used for multi-class classification.
+ *   - Tanh: f(x) = tanh(x). Squashes to [-1,1], zero-centered alternative to
+ *     sigmoid.
+ */
 typedef enum { Linear, ReLU, Sigmoid, Softmax, Tanh } Activation;
+
+/**
+ * @brief Loss function types for training.
+ *
+ * Defines how prediction error is measured during training:
+ *
+ *   - CrossEntropy: -Σ(y * log(ŷ)). Standard for classification tasks, measures
+ *     divergence between predicted and true probability distributions.
+ */
 typedef enum { CrossEntropy } Loss;
+
+/**
+ * @brief Optimizer algorithm types for weight updates.
+ *
+ * Defines the strategy used to update weights during backpropagation:
+ *
+ *   - SGD: Basic gradient descent with fixed learning rate
+ *   - Momentum: Accumulates velocity from past gradients (β=0.9)
+ *   - RMSprop: Adapts learning rate per-parameter using squared gradient
+ *     average (β=0.999)
+ *   - Adam: Combines momentum and RMSprop with bias correction (β₁=0.9,
+ *     β₂=0.999)
+ */
 typedef enum { Adam, SGD, Momentum, RMSprop } OptimizerType;
 
 typedef struct DenseContext DenseContext;
 typedef struct OptimizerState OptimizerState;
 
+/**
+ * @brief Dense (fully connected) layer structure.
+ *
+ * Represents a single dense layer in a neural network. Performs linear
+ * transformation followed by an activation function:
+ *
+ *   output = activation(input @ weight + bias)
+ *
+ * Where:
+ *   - input: (batch_size × in_features)
+ *   - weight: (in_features × out_features)
+ *   - bias: (1 × out_features) - broadcasted across batch
+ *   - output: (batch_size × out_features)
+ *
+ * Weight initialization depends on activation type:
+ *   - ReLU: He initialization (accounts for ReLU's asymmetry)
+ *   - Sigmoid/Tanh/Linear/Softmax: Xavier initialization (symmetric
+ *     activations)
+ *
+ * @field weight      Weight matrix of shape (in_features × out_features)
+ * @field bias        Bias vector of shape (1 × out_features)
+ * @field activation  Activation function applied after linear transformation
+ */
 typedef struct {
   Tensor *weight;
   Tensor *bias;

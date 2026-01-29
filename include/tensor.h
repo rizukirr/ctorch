@@ -30,14 +30,28 @@
  *
  * Represents a dynamically sized 2D array stored in row-major order.
  * Used as the primary tensor type for neural network operations.
+ *
+ * @field rows      Number of rows in the matrix
+ * @field cols      Number of columns in the matrix
+ * @field capacity  Allocated capacity for growth
+ * @field data      Contiguous array storing matrix data in row-major order
  */
 typedef struct {
-  size_t rows;     /** Number of rows in the matrix */
-  size_t cols;     /** Number of columns in the matrix */
-  size_t capacity; /** Allocated capacity for growth */
-  float *data; /** Contiguous array storing matrix data in row-major order */
+  size_t rows;
+  size_t cols;
+  size_t capacity;
+  float *data;
 } Tensor;
 
+/**
+ * @brief Axis selection for tensor slicing and selection operations.
+ *
+ * Specifies whether operations should work along rows or columns:
+ *   - AxisRow: Operate along rows (select/slice a specific row)
+ *   - AxisColumn: Operate along columns (select/slice a specific column)
+ *
+ * Used by functions like tensor_select(), tensor_slice(), and tensor_drop().
+ */
 typedef enum { AxisRow, AxisColumn } Axis;
 
 /**
@@ -343,15 +357,16 @@ float tensor_avg(Tensor *tensor);
 Tensor *tensor_dup(TensorContext *ctx, Tensor *src);
 
 /**
- * @brief Creates a new tensor with all elements set to zero.
+ * @brief Creates a new tensor initialized with zeros.
  *
- * Allocates a new empty tensor using the arena allocator. The tensor starts
- * with 0 rows and will grow dynamically as data is appended.
+ * Allocates a new tensor with the specified dimensions and fills it with zero
+ * values. All elements are initialized to 0.0f.
  *
- * @param ctx       Memory context for allocation
- * @param num_cols  Number of columns in the tensor
+ * @param ctx   Memory context for allocation
+ * @param rows  Number of rows in the tensor
+ * @param cols  Number of columns in the tensor
  *
- * @return Pointer to new Tensor, or NULL on allocation failure
+ * @return Pointer to new zero-filled tensor, or NULL on allocation failure
  */
 Tensor *tensor_zeros(TensorContext *ctx, size_t rows, size_t cols);
 

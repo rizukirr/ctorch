@@ -8,32 +8,137 @@
 
 #define dense_ARENA_SIZE 1024 * 16
 
+/* Optimizer hyperparameters */
+#define MOMENTUM_BETA 0.9f  // Momentum decay rate for velocity
+#define RMSPROP_BETA 0.999f // RMSprop decay rate for squared gradient average
+#define EPSILON 1e-8f       // Small constant to prevent division by zero
+#define ADAM_BETA1 0.9f     // Adam first moment decay rate
+#define ADAM_BETA2 0.999f   // Adam second moment decay rate
+
+/**
+ * @brief Dynamic array of Dense layer pointers.
+ *
+ * Used to store the sequential stack of Dense layers in a neural network.
+ * Supports dynamic resizing as layers are added during model construction.
+ *
+ * @field capacity  Maximum number of layers the array can hold before resizing
+ * @field size      Current number of layers stored in the array
+ * @field items     Array of pointers to Dense layer structures
+ */
 typedef struct {
   size_t capacity;
   size_t size;
   Dense **items;
 } DenseArr;
 
+/**
+ * @brief Dynamic array of Tensor pointers.
+ *
+ * Used to cache intermediate tensors during forward pass (layer inputs and
+ * pre-activation values). These cached values are needed during backpropagation
+ * to compute gradients.
+ *
+ * @field capacity  Maximum number of tensors the array can hold before resizing
+ * @field size      Current number of tensors stored in the array
+ * @field items     Array of pointers to Tensor structures
+ */
 typedef struct {
   size_t capacity;
   size_t size;
   Tensor **items;
 } TensorArr;
 
+/**
+ * @brief Optimizer state for adaptive gradient methods.
+ *
+ * Stores moment estimates and correction terms needed by Momentum, RMSprop,
+ * and Adam optimizers. Each Dense layer has its own OptimizerState to track
+ * per-parameter statistics across training iterations.
+ *
+ * Memory layout:
+ *   - v_weights, v_biases: Second moment (mean of squared gradients) for
+ *     RMSprop/Adam, or velocity for Momentum
+ *   - m_weights, m_biases: First moment (mean of gradients) for Adam only
+ *   - t: Timestep counter incremented each optimizer step
+ *   - beta1_correction: Accumulated β₁^t for Adam bias correction (starts at
+ *     1.0, multiplied by β₁ each step)
+ *   - beta2_correction: Accumulated β₂^t for Adam bias correction (starts at
+ *     1.0, multiplied by β₂ each step)
+ *
+ * Shape invariants:
+ *   - v_weights, m_weights: (in_features × out_features) matching layer weight
+ *   - v_biases, m_biases: (1 × out_features) matching layer bias
+ *
+ * @field v_weights         Second moment estimate for weights (or velocity for
+ *                          Momentum)
+ * @field v_biases          Second moment estimate for biases (or velocity for
+ *                          Momentum)
+ * @field m_weights         First moment estimate for weights (Adam only)
+ * @field m_biases          First moment estimate for biases (Adam only)
+ * @field t                 Timestep counter (incremented each update)
+ * @field beta1_correction  Accumulated β₁^t for bias correction (Adam only)
+ * @field beta2_correction  Accumulated β₂^t for bias correction (Adam only)
+ */
 struct OptimizerState {
   Tensor *v_weights;
   Tensor *v_biases;
   Tensor *m_weights;
   Tensor *m_biases;
   int t;
+  float beta1_correction;
+  float beta2_correction;
 };
 
+/**
+ * @brief Dynamic array of OptimizerState pointers.
+ *
+ * Stores optimizer state for each Dense layer in the network. The array is
+ * parallel to the DenseArr - optimizer_state[i] corresponds to
+ * hidden_layers[i].
+ *
+ * @field capacity  Maximum number of optimizer states before resizing
+ * @field size      Current number of optimizer states (matches layer count)
+ * @field items     Array of pointers to OptimizerState structures
+ */
 typedef struct {
   size_t capacity;
   size_t size;
   OptimizerState **items;
 } OptimizerStateArr;
 
+/**
+ * @brief Sequential neural network context (Keras-style model).
+ *
+ * Manages a stack of Dense layers and their associated state for
+ * forward/backward passes. Implements a sequential feedforward architecture
+ * where each layer's output becomes the next layer's input.
+ *
+ * Memory management:
+ *   - All layers, optimizer states, and dynamic arrays are allocated via arena
+ *   - Intermediate tensors (layer_inputs, pre_activations, output) are managed
+ *     by tensor_ctx and freed together
+ *   - Call dense_free() to release all resources at once
+ *
+ * Usage pattern:
+ *   1. dense_init(in_features) - create context
+ *   2. dense_create(...) - add layers sequentially
+ *   3. dense_forward(input) - compute predictions
+ *   4. dense_backward(grad_output, lr, optimizer) - update weights
+ *   5. dense_free() - cleanup
+ *
+ * @field tensor_ctx       Memory context for all tensor allocations
+ * @field input_size       Expected number of input features for next layer
+ * (updated after each dense_create call)
+ * @field hidden_layers    Sequential stack of Dense layers in the network
+ * @field layer_inputs     Cached inputs to each layer during forward pass
+ * (needed for weight gradients in backprop)
+ * @field pre_activations  Cached pre-activation outputs (after linear
+ * transform, before activation function) for each layer
+ * @field optimizer_state  Optimizer state for each layer (parallel to
+ * hidden_layers)
+ * @field output           Final output tensor from most recent forward pass
+ * @field arena            Memory arena for layer/array allocations
+ */
 struct DenseContext {
   TensorContext *tensor_ctx;
   size_t input_size;
@@ -79,7 +184,6 @@ DenseContext *dense_init(size_t in_features) {
     return NULL;
   }
 
-  // Allocate the DenseArr structure for layer tracking
   DenseArr *dense_arr =
       arena_alloc(arena, sizeof(DenseArr), ARENA_ALIGNOF(DenseArr));
   if (!dense_arr) {
@@ -106,7 +210,6 @@ DenseContext *dense_init(size_t in_features) {
   dense_arr->size = 0;
   dense_arr->items = NULL;
 
-  // Allocate arrays for caching intermediate values during forward pass
   TensorArr *layer_inputs =
       arena_alloc(arena, sizeof(TensorArr), ARENA_ALIGNOF(TensorArr));
   if (!layer_inputs) {
@@ -193,18 +296,10 @@ int dense_create(DenseContext *ctx, size_t out_features,
     layer->weight =
         tensor_randn_he(ctx->tensor_ctx, ctx->input_size, out_features);
     break;
-  case Sigmoid:
-  case Tanh:
-    layer->weight =
-        tensor_randn_xavier(ctx->tensor_ctx, ctx->input_size, out_features);
-    break;
-  case Linear:
-    layer->weight =
-        tensor_randn_xavier(ctx->tensor_ctx, ctx->input_size, out_features);
-    break;
   default:
+    // Sigmoid, Tanh, Linear, Softmax all use Xavier initialization
     layer->weight =
-        tensor_randn(ctx->tensor_ctx, ctx->input_size, out_features);
+        tensor_randn_xavier(ctx->tensor_ctx, ctx->input_size, out_features);
     break;
   }
 
@@ -217,7 +312,6 @@ int dense_create(DenseContext *ctx, size_t out_features,
 
   layer->activation = activation;
 
-  // Create momentum state for this layer
   OptimizerState *m_state =
       optimizer_state_init(ctx, ctx->input_size, out_features);
   if (!m_state)
@@ -261,14 +355,12 @@ Tensor *dense_forward(DenseContext *ctx, Tensor *input) {
     // Cache this layer's input for backward pass
     array_append(ctx->arena, ctx->layer_inputs, layer_input);
 
-    // Get the bias row (all bias values for this layer)
     float *bias_values = tensor_slice(ctx->tensor_ctx, layer->bias, 0, AxisRow);
     if (!bias_values) {
       ctorch_set_error(CTORCH_ERROR_NULL_DATA, "failed to extract bias values");
       return NULL;
     }
 
-    // Apply linear transformation for this layer
     output = linear(ctx->tensor_ctx, layer_input, layer->weight, bias_values);
     if (!output) {
       return NULL;
@@ -278,7 +370,6 @@ Tensor *dense_forward(DenseContext *ctx, Tensor *input) {
     // in-place, so after forward pass this will contain post-activation values)
     array_append(ctx->arena, ctx->pre_activations, output);
 
-    // Apply this layer's activation function
     switch (layer->activation) {
     case ReLU:
       relu(output);
@@ -391,6 +482,8 @@ OptimizerState *optimizer_state_init(DenseContext *ctx, size_t in_features,
   }
 
   state->t = 0;
+  state->beta1_correction = 1.0f;
+  state->beta2_correction = 1.0f;
 
   return state;
 }
@@ -412,7 +505,7 @@ int momentum(OptimizerState *momentum_state, float lr, Dense *layer, Tensor *dw,
     return CTORCH_ERROR_DIMENSION_MISMATCH;
   }
 
-  float beta = 0.9f;
+  float beta = MOMENTUM_BETA;
   float beta_t = 1.0f - beta;
 
   size_t w_size = layer->weight->rows * layer->weight->cols;
@@ -454,15 +547,15 @@ int rmsprop(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
     return CTORCH_ERROR_DIMENSION_MISMATCH;
   }
 
-  float beta = 0.999f;
-  float eps = 1e-8f;
+  float beta = RMSPROP_BETA;
+  float eps = EPSILON;
 
   size_t w_size = layer->weight->rows * layer->weight->cols;
   for (size_t i = 0; i < w_size; i++) {
     float g = dw->data[i];
 
     optimizer_state->v_weights->data[i] =
-        beta * optimizer_state->v_weights->data[i] + (1 - beta) * powf(g, 2);
+        beta * optimizer_state->v_weights->data[i] + (1 - beta) * g * g;
 
     layer->weight->data[i] -=
         lr * g / (sqrtf(optimizer_state->v_weights->data[i]) + eps);
@@ -472,7 +565,7 @@ int rmsprop(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
     float g = db->data[i];
 
     optimizer_state->v_biases->data[i] =
-        beta * optimizer_state->v_biases->data[i] + (1 - beta) * powf(g, 2);
+        beta * optimizer_state->v_biases->data[i] + (1 - beta) * g * g;
 
     layer->bias->data[i] -=
         lr * g / (sqrtf(optimizer_state->v_biases->data[i]) + eps);
@@ -500,13 +593,15 @@ int adam(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
 
   optimizer_state->t++;
 
-  float beta1 = 0.9f;
-  float beta2 = 0.999f;
-  float eps = 1e-8f;
+  float beta1 = ADAM_BETA1;
+  float beta2 = ADAM_BETA2;
+  float eps = EPSILON;
 
-  int t = optimizer_state->t;
-  float beta1_t = powf(beta1, t);
-  float beta2_t = powf(beta2, t);
+  optimizer_state->beta1_correction *= beta1;
+  optimizer_state->beta2_correction *= beta2;
+
+  float beta1_t = optimizer_state->beta1_correction;
+  float beta2_t = optimizer_state->beta2_correction;
 
   size_t w_size = layer->weight->rows * layer->weight->cols;
   for (size_t i = 0; i < w_size; i++) {
@@ -516,7 +611,7 @@ int adam(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
         beta1 * optimizer_state->m_weights->data[i] + (1 - beta1) * g;
 
     optimizer_state->v_weights->data[i] =
-        beta2 * optimizer_state->v_weights->data[i] + (1 - beta2) * powf(g, 2);
+        beta2 * optimizer_state->v_weights->data[i] + (1 - beta2) * g * g;
 
     float m_hat = optimizer_state->m_weights->data[i] / (1 - beta1_t);
     float v_hat = optimizer_state->v_weights->data[i] / (1 - beta2_t);
@@ -530,7 +625,7 @@ int adam(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
         beta1 * optimizer_state->m_biases->data[i] + (1 - beta1) * g;
 
     optimizer_state->v_biases->data[i] =
-        beta2 * optimizer_state->v_biases->data[i] + (1 - beta2) * powf(g, 2);
+        beta2 * optimizer_state->v_biases->data[i] + (1 - beta2) * g * g;
 
     float m_hat = optimizer_state->m_biases->data[i] / (1 - beta1_t);
     float v_hat = optimizer_state->v_biases->data[i] / (1 - beta2_t);
@@ -570,16 +665,13 @@ int dense_backward(DenseContext *ctx, Tensor *grad_output, float lr,
     return CTORCH_ERROR_INVALID;
   }
 
-  // Current gradient flowing backward (dL/dY for current layer)
   Tensor *upstream = grad_output;
 
-  // Iterate from last layer to first (backpropagation)
   for (size_t idx = ctx->hidden_layers->size; idx > 0; idx--) {
-    size_t i = idx - 1; // Current layer index (0-based)
+    size_t i = idx - 1;
     Dense *layer = ctx->hidden_layers->items[i];
     Tensor *layer_input = ctx->layer_inputs->items[i];
-    Tensor *layer_output =
-        ctx->pre_activations->items[i]; // Post-activation values
+    Tensor *layer_output = ctx->pre_activations->items[i];
 
     // For Softmax with cross-entropy, the combined gradient is already computed
     // by cross_entropy_backward, so we skip activation backward for Softmax
@@ -606,19 +698,16 @@ int dense_backward(DenseContext *ctx, Tensor *grad_output, float lr,
       }
     }
 
-    // Compute weight gradient: dL/dW = input^T @ activation_grad
     Tensor *dw = weight_gradient(ctx->tensor_ctx, layer_input, activation_grad);
     if (!dw) {
       return CTORCH_ERROR_INVALID;
     }
 
-    // Compute bias gradient: dL/db = sum(activation_grad, axis=0)
     Tensor *db = bias_gradient(ctx->tensor_ctx, activation_grad);
     if (!db) {
       return CTORCH_ERROR_INVALID;
     }
 
-    // Compute input gradient: dL/dX = activation_grad @ weight^T
     Tensor *dx =
         input_gradient(ctx->tensor_ctx, activation_grad, layer->weight);
     if (!dx) {
@@ -642,7 +731,6 @@ int dense_backward(DenseContext *ctx, Tensor *grad_output, float lr,
       break;
     }
 
-    // Propagate gradient to previous layer
     upstream = dx;
   }
 
@@ -681,7 +769,7 @@ Tensor *predict(DenseContext *ctx, Tensor *input) {
     float pred_idx[1] = {0.0f};
     float max_prob = -1.0f;
     for (size_t j = 0; j < output->cols; j++) {
-      float prob = tensor_get(output, i, j);
+      float prob = output->data[i * output->cols + j];
       if (prob > max_prob) {
         max_prob = prob;
         pred_idx[0] = (float)j;
@@ -727,22 +815,21 @@ float accuracy(DenseContext *ctx, Tensor *predictions, Tensor *targets) {
   bool is_one_hot = targets->cols > 1;
 
   for (size_t i = 0; i < predictions->rows; i++) {
-    float pred = tensor_get(predictions, i, 0);
+    float pred = predictions->data[i * predictions->cols];
     float target_class;
 
     if (is_one_hot) {
-      // Find argmax of one-hot encoded row
       float max_val = -1.0f;
       target_class = 0.0f;
       for (size_t j = 0; j < targets->cols; j++) {
-        float val = tensor_get(targets, i, j);
+        float val = targets->data[i * targets->cols + j];
         if (val > max_val) {
           max_val = val;
           target_class = (float)j;
         }
       }
     } else {
-      target_class = tensor_get(targets, i, 0);
+      target_class = targets->data[i * targets->cols];
     }
 
     if (pred == target_class)

@@ -108,11 +108,9 @@ void softmax(Tensor *input) {
     return;
   }
 
-  // Process each row independently
   for (size_t i = 0; i < input->rows; i++) {
     float *row = &input->data[i * input->cols];
 
-    // Find max for numerical stability
     float max_val = row[0];
     for (size_t j = 1; j < input->cols; j++) {
       if (row[j] > max_val) {
@@ -120,21 +118,19 @@ void softmax(Tensor *input) {
       }
     }
 
-    // Compute exp(x - max) and sum in single pass
     float sum = 0.0f;
     for (size_t j = 0; j < input->cols; j++) {
       row[j] = expf(row[j] - max_val);
       sum += row[j];
     }
 
-    // Normalize by sum
     for (size_t j = 0; j < input->cols; j++) {
       row[j] /= sum;
     }
   }
 }
 
-Tensor *softmax_2dup(TensorContext *ctx, Tensor *input) {
+Tensor *softmax_dup(TensorContext *ctx, Tensor *input) {
   if (!ctx) {
     ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
     return NULL;

@@ -280,11 +280,10 @@ void tensor_transpose(Tensor *tensor) {
     tensor_append_tmp(tmp, row_values);
   }
 
-  // Copy data and update dimensions
   memcpy(tensor->data, tmp->data, tmp->rows * tmp->cols * sizeof *tmp->data);
   tensor->rows = tmp->rows;
   tensor->cols = tmp->cols;
-  // Keep original capacity since we're reusing the same buffer
+
   tensor_free_tmp(tmp);
 }
 
@@ -407,7 +406,6 @@ Tensor *tensor_dup(TensorContext *ctx, Tensor *src) {
     return NULL;
   }
 
-  // Copy each row from source to destination
   for (size_t i = 0; i < src->rows; i++) {
     tensor_append(ctx, dest, &src->data[i * src->cols]);
   }

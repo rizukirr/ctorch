@@ -74,7 +74,8 @@ void sigmoid(Tensor *input);
 void softmax(Tensor *input);
 
 /**
- * @brief Duplicate input and applies softmax activation function in-place.
+ * @brief Duplicate input and applies softmax activation function in-place
+ * then return it as a new Tensor.
  *
  * @param ctx     Memory context for allocation
  * @param input   Source tensor to duplicate and apply activation to
@@ -82,7 +83,7 @@ void softmax(Tensor *input);
  * @return Output tensor with duplicated input and applied activation, or NULL
  * on error
  */
-Tensor *softmax_2dup(TensorContext *ctx, Tensor *input);
+Tensor *softmax_dup(TensorContext *ctx, Tensor *input);
 
 /**
  * @brief Applies hyperbolic tangent (tanh) activation function in-place.

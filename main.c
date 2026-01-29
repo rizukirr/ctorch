@@ -1,4 +1,3 @@
-#include "errors.h"
 #include "keras.h"
 #include "ops.h"
 #include "tensor.h"
@@ -75,7 +74,7 @@ Tensor *circles_data(TensorContext *ctx, size_t n, size_t classes) {
     for (size_t i = 0; i < n; i++) {
       /* Random angle */
       float angle = 2.0f * M_PI * ((float)rand() / (float)RAND_MAX);
-      
+
       /* Point on circle + noise */
       float r = radius + randn() * 0.15f;
       float xs = r * cosf(angle);
@@ -101,7 +100,7 @@ Tensor *xor_data(TensorContext *ctx, size_t n, size_t classes) {
   for (size_t j = 0; j < classes; j++) {
     for (size_t i = 0; i < n; i++) {
       float xs, xc;
-      
+
       if (classes == 2) {
         /* XOR pattern: class 0 in quadrants 1&3, class 1 in quadrants 2&4 */
         int quadrant = (j == 0) ? (i % 2 == 0 ? 0 : 2) : (i % 2 == 0 ? 1 : 3);
@@ -116,7 +115,7 @@ Tensor *xor_data(TensorContext *ctx, size_t n, size_t classes) {
         xs = distance * cosf(angle) + randn() * 0.2f;
         xc = distance * sinf(angle) + randn() * 0.2f;
       }
-      
+
       float class = (float)j;
       float data[3] = {xs, xc, class};
       tensor_append(ctx, X, data);
@@ -127,13 +126,13 @@ Tensor *xor_data(TensorContext *ctx, size_t n, size_t classes) {
 }
 
 int main(void) {
-  srand(42);  /* Fixed seed for reproducibility */
+  srand(42); /* Fixed seed for reproducibility */
 
   const char *datasets[] = {"blob", "circles", "xor", "spiral"};
-  
+
   for (int dataset_idx = 0; dataset_idx < 4; dataset_idx++) {
     printf("\n=== Testing %s dataset ===\n", datasets[dataset_idx]);
-    
+
     TensorContext *tensor_ctx = tensor_init();
     if (!tensor_ctx)
       return 1;
@@ -141,13 +140,22 @@ int main(void) {
     /* Choose dataset */
     Tensor *data;
     switch (dataset_idx) {
-      case 0: data = blob_data(tensor_ctx, 100, 3); break;
-      case 1: data = circles_data(tensor_ctx, 100, 3); break;
-      case 2: data = xor_data(tensor_ctx, 100, 3); break;
-      case 3: data = spiral_data(tensor_ctx, 100, 3); break;
-      default: return 1;
+    case 0:
+      data = blob_data(tensor_ctx, 100, 3);
+      break;
+    case 1:
+      data = circles_data(tensor_ctx, 100, 3);
+      break;
+    case 2:
+      data = xor_data(tensor_ctx, 100, 3);
+      break;
+    case 3:
+      data = spiral_data(tensor_ctx, 100, 3);
+      break;
+    default:
+      return 1;
     }
-    
+
     Tensor *x = tensor_drop(tensor_ctx, data, 2, AxisColumn);
     Tensor *y = tensor_select(tensor_ctx, data, 2, AxisColumn);
 
@@ -162,18 +170,20 @@ int main(void) {
 
     for (size_t i = 0; i < 1000; i++) {
       Tensor *output = dense_forward(dense_ctx, x);
-      Tensor *softmax_output = softmax_2dup(tensor_ctx, output);
+      Tensor *softmax_output = softmax_dup(tensor_ctx, output);
 
       Tensor *loss = cross_entropy(tensor_ctx, output, y);
       float loss_avg = tensor_avg(loss);
 
-      Tensor *grad_output = cross_entropy_backward(tensor_ctx, softmax_output, y);
+      Tensor *grad_output =
+          cross_entropy_backward(tensor_ctx, softmax_output, y);
       dense_backward(dense_ctx, grad_output, 0.01f, Adam);
 
       if (i % 200 == 0 || i == 999) {
         Tensor *preds = predict(dense_ctx, x);
         float acc = accuracy(dense_ctx, preds, y);
-        printf("Iter %4zu: loss=%.6f, accuracy=%.2f%%\n", i, loss_avg, acc * 100);
+        printf("Iter %4zu: loss=%.6f, accuracy=%.2f%%\n", i, loss_avg,
+               acc * 100);
       }
     }
 

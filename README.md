@@ -97,7 +97,7 @@ int main(void) {
     // Training loop
     for (size_t i = 0; i < 1000; i++) {
         Tensor *output = dense_forward(model, x);
-        Tensor *softmax_output = softmax_2dup(ctx, output);
+        Tensor *softmax_output = softmax_dup(ctx, output);
         
         Tensor *loss = cross_entropy(ctx, output, y);
         Tensor *grad_output = cross_entropy_backward(ctx, softmax_output, y);
