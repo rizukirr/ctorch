@@ -1,6 +1,7 @@
 #ifndef CTORCH_KERAS_H
 #define CTORCH_KERAS_H
 
+#include "optimizers.h"
 #include "tensor.h"
 
 /**
@@ -31,22 +32,7 @@ typedef enum { Linear, ReLU, Sigmoid, Softmax, Tanh } Activation;
  */
 typedef enum { CrossEntropy } Loss;
 
-/**
- * @brief Optimizer algorithm types for weight updates.
- *
- * Defines the strategy used to update weights during backpropagation:
- *
- *   - SGD: Basic gradient descent with fixed learning rate
- *   - Momentum: Accumulates velocity from past gradients (β=0.9)
- *   - RMSprop: Adapts learning rate per-parameter using squared gradient
- *     average (β=0.999)
- *   - Adam: Combines momentum and RMSprop with bias correction (β₁=0.9,
- *     β₂=0.999)
- */
-typedef enum { Adam, SGD, Momentum, RMSprop } OptimizerType;
-
 typedef struct DenseContext DenseContext;
-typedef struct OptimizerState OptimizerState;
 
 /**
  * @brief Dense (fully connected) layer structure.
@@ -161,142 +147,6 @@ int dense_backward(DenseContext *ctx, Tensor *grad_output, float lr,
  * @return Output tensor with predicted class indices, or NULL on error
  */
 Tensor *predict(DenseContext *ctx, Tensor *input);
-
-/**
- * @brief Performs Stochastic Gradient Descent (SGD) on the given layer.
- *
- * Updates weights and biases using the simplest optimization rule:
- *
- *   weight = weight - lr * gradient
- *
- * SGD has no memory of past gradients. Each update depends only on the
- * current gradient, which can cause oscillation in steep valleys.
- *
- * @param lr     Learning rate (step size for gradient descent)
- * @param layer  Layer to update weights and biases for
- * @param dw     Gradient of loss with respect to layer weights (dL/dW)
- * @param db     Gradient of loss with respect to layer biases (dL/db)
- *
- * @return 0 on success, negative CTorchError code on failure
- */
-int sgd(float lr, Dense *layer, Tensor *dw, Tensor *db);
-
-/**
- * @brief Initializes a new OptimizerState for a given layer.
- *
- * Creates optimizer state tensors for storing moment estimates used by
- * Momentum, RMSprop, and Adam optimizers. The state contains:
- *   - m_weights, m_biases: First moment (mean of gradients) for Momentum/Adam
- *   - v_weights, v_biases: Second moment (mean of squared gradients) for
- *                          RMSprop/Adam
- *   - t: Timestep counter for Adam bias correction
- *
- * All moment tensors are initialized to zeros. Shape matches layer parameters:
- *   - m_weights, v_weights: (in_features x out_features)
- *   - m_biases, v_biases: (1 x out_features)
- *
- * @param ctx           Memory context for tensor allocation
- * @param in_features   Number of input features (rows in weight matrix)
- * @param out_features  Number of output features (cols in weight matrix)
- *
- * @return Pointer to new OptimizerState, or NULL on allocation failure
- */
-OptimizerState *optimizer_state_init(DenseContext *ctx, size_t in_features,
-                                     size_t out_features);
-
-/**
- * @brief Performs Momentum optimization on the given layer.
- *
- * Accumulates velocity from past gradients to smooth updates and accelerate
- * convergence. Helps escape local minima and reduces oscillation in valleys.
- *
- * Formula:
- *   v = β*v + (1-β)*g        (update velocity)
- *   weight = weight - lr*v   (update parameters)
- *
- * Where:
- *   β = 0.9 (momentum coefficient)
- *   g = gradient (dw or db)
- *   v = velocity (stored in optimizer_state, persists across iterations)
- *
- * @param optimizer_state  Optimizer state containing velocity tensors
- * (v_weights, v_biases)
- * @param lr               Learning rate
- * @param layer            Layer to update weights and biases for
- * @param dw               Gradient of loss with respect to layer weights
- * (dL/dW)
- * @param db               Gradient of loss with respect to layer biases (dL/db)
- *
- * @return 0 on success, negative CTorchError code on failure
- */
-int momentum(OptimizerState *optimizer_state, float lr, Dense *layer,
-             Tensor *dw, Tensor *db);
-
-/**
- * @brief Performs RMSprop (Root Mean Square Propagation) on the given layer.
- *
- * Adapts learning rate per-parameter by dividing by the running average of
- * gradient magnitudes. Parameters with large gradients get smaller updates,
- * parameters with small gradients get larger updates.
- *
- * Formula:
- *   v = β*v + (1-β)*g²              (update squared gradient average)
- *   weight = weight - lr*g/(√v+ε)   (update parameters)
- *
- * Where:
- *   β = 0.999 (decay rate)
- *   ε = 1e-8 (prevents division by zero)
- *   g = gradient (dw or db)
- *   v = running average of squared gradients (stored in optimizer_state)
- *
- * @param optimizer_state  Optimizer state containing squared gradient averages
- *                         (v_weights, v_biases)
- * @param lr               Learning rate
- * @param layer            Layer to update weights and biases for
- * @param dw               Gradient of loss with respect to layer weights
- *                         (dL/dW)
- * @param db               Gradient of loss with respect to layer biases (dL/db)
- *
- * @return 0 on success, negative CTorchError code on failure
- */
-int rmsprop(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
-            Tensor *db);
-
-/**
- * @brief Performs Adam (Adaptive Moment Estimation) on the given layer.
- *
- * Combines Momentum and RMSprop with bias correction. Tracks both the mean
- * (first moment) and variance (second moment) of gradients, providing adaptive
- * per-parameter learning rates with smoothed updates.
- *
- * Formula:
- *   m = β₁*m + (1-β₁)*g           (first moment estimate)
- *   v = β₂*v + (1-β₂)*g²          (second moment estimate)
- *   m̂ = m / (1-β₁ᵗ)               (bias-corrected first moment)
- *   v̂ = v / (1-β₂ᵗ)               (bias-corrected second moment)
- *   weight = weight - lr*m̂/(√v̂+ε) (update parameters)
- *
- * Where:
- *   β₁ = 0.9 (first moment decay)
- *   β₂ = 0.999 (second moment decay)
- *   ε = 1e-8 (prevents division by zero)
- *   t = timestep (increments each call, stored in optimizer_state)
- *
- * Bias correction compensates for zero-initialization of moments, especially
- * important in early training iterations.
- *
- * @param optimizer_state  Optimizer state containing moment estimates
- *                         (m_weights, v_weights, m_biases, v_biases, t)
- * @param lr               Learning rate
- * @param layer            Layer to update weights and biases for
- * @param dw               Gradient of loss with respect to layer weights
- *                         (dL/dW)
- * @param db               Gradient of loss with respect to layer biases (dL/db)
- *
- * @return 0 on success, negative CTorchError code on failure
- */
-int adam(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
-         Tensor *db);
 
 /**
  * @brief Computes the accuracy of the network predictions.

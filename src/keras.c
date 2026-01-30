@@ -2,18 +2,12 @@
 #include "arena.h"
 #include "errors.h"
 #include "ops.h"
+#include "optimizers.h"
 #include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 
 #define dense_ARENA_SIZE 1024 * 16
-
-/* Optimizer hyperparameters */
-#define MOMENTUM_BETA 0.9f  // Momentum decay rate for velocity
-#define RMSPROP_BETA 0.999f // RMSprop decay rate for squared gradient average
-#define EPSILON 1e-8f       // Small constant to prevent division by zero
-#define ADAM_BETA1 0.9f     // Adam first moment decay rate
-#define ADAM_BETA2 0.999f   // Adam second moment decay rate
 
 /**
  * @brief Dynamic array of Dense layer pointers.
@@ -47,47 +41,6 @@ typedef struct {
   size_t size;
   Tensor **items;
 } TensorArr;
-
-/**
- * @brief Optimizer state for adaptive gradient methods.
- *
- * Stores moment estimates and correction terms needed by Momentum, RMSprop,
- * and Adam optimizers. Each Dense layer has its own OptimizerState to track
- * per-parameter statistics across training iterations.
- *
- * Memory layout:
- *   - v_weights, v_biases: Second moment (mean of squared gradients) for
- *     RMSprop/Adam, or velocity for Momentum
- *   - m_weights, m_biases: First moment (mean of gradients) for Adam only
- *   - t: Timestep counter incremented each optimizer step
- *   - beta1_correction: Accumulated β₁^t for Adam bias correction (starts at
- *     1.0, multiplied by β₁ each step)
- *   - beta2_correction: Accumulated β₂^t for Adam bias correction (starts at
- *     1.0, multiplied by β₂ each step)
- *
- * Shape invariants:
- *   - v_weights, m_weights: (in_features × out_features) matching layer weight
- *   - v_biases, m_biases: (1 × out_features) matching layer bias
- *
- * @field v_weights         Second moment estimate for weights (or velocity for
- *                          Momentum)
- * @field v_biases          Second moment estimate for biases (or velocity for
- *                          Momentum)
- * @field m_weights         First moment estimate for weights (Adam only)
- * @field m_biases          First moment estimate for biases (Adam only)
- * @field t                 Timestep counter (incremented each update)
- * @field beta1_correction  Accumulated β₁^t for bias correction (Adam only)
- * @field beta2_correction  Accumulated β₂^t for bias correction (Adam only)
- */
-struct OptimizerState {
-  Tensor *v_weights;
-  Tensor *v_biases;
-  Tensor *m_weights;
-  Tensor *m_biases;
-  int t;
-  float beta1_correction;
-  float beta2_correction;
-};
 
 /**
  * @brief Dynamic array of OptimizerState pointers.
@@ -313,7 +266,7 @@ int dense_create(DenseContext *ctx, size_t out_features,
   layer->activation = activation;
 
   OptimizerState *m_state =
-      optimizer_state_init(ctx, ctx->input_size, out_features);
+      optimizer_state_init(ctx->tensor_ctx, ctx->input_size, out_features);
   if (!m_state)
     return CTORCH_ERROR_ARENA_ALLOCATION_FAILED;
 
@@ -400,6 +353,13 @@ void dense_free(DenseContext *ctx) {
   if (!ctx)
     return;
 
+  // Free optimizer states (allocated with calloc in optimizer_state_init)
+  if (ctx->optimizer_state) {
+    for (size_t i = 0; i < ctx->optimizer_state->size; i++) {
+      free(ctx->optimizer_state->items[i]);
+    }
+  }
+
   if (ctx->tensor_ctx)
     tensor_free(ctx->tensor_ctx);
 
@@ -407,233 +367,6 @@ void dense_free(DenseContext *ctx) {
     arena_free(ctx->arena);
 
   free(ctx);
-}
-
-int sgd(float lr, Dense *layer, Tensor *dw, Tensor *db) {
-  if (!layer || !dw || !db) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "layer, dw, or db is NULL");
-    return CTORCH_ERROR_NULL_PARAMETER;
-  }
-
-  if (dw->rows != layer->weight->rows || dw->cols != layer->weight->cols) {
-    ctorch_set_error(CTORCH_ERROR_DIMENSION_MISMATCH, "dw shape mismatch");
-    return CTORCH_ERROR_DIMENSION_MISMATCH;
-  }
-
-  float *w = layer->weight->data;
-  float *gW = dw->data;
-
-  size_t size = layer->weight->rows * layer->weight->cols;
-  for (size_t i = 0; i < size; i++)
-    w[i] -= lr * gW[i];
-
-  for (size_t i = 0; i < layer->bias->cols; i++)
-    layer->bias->data[i] -= lr * db->data[i];
-
-  return 0;
-}
-
-OptimizerState *optimizer_state_init(DenseContext *ctx, size_t in_features,
-                                     size_t out_features) {
-  if (!ctx) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, "context is NULL");
-    return NULL;
-  }
-
-  if (in_features == 0 || out_features == 0) {
-    ctorch_set_error_fmt(CTORCH_ERROR_INVALID_SHAPE,
-                         "dimensions must be positive (received: %zux%zu)",
-                         in_features, out_features);
-    return NULL;
-  }
-
-  OptimizerState *state = arena_alloc(ctx->arena, sizeof(OptimizerState),
-                                      ARENA_ALIGNOF(OptimizerState));
-  if (!state) {
-    ctorch_set_error(CTORCH_ERROR_ARENA_ALLOCATION_FAILED,
-                     "failed to allocate optimizer state");
-    return NULL;
-  }
-
-  // v_weights shape: (in_features × out_features) - matches layer->weight
-  state->v_weights = tensor_zeros(ctx->tensor_ctx, in_features, out_features);
-  if (!state->v_weights) {
-    free(state);
-    return NULL;
-  }
-
-  // v_biases shape: (1 × out_features) - matches layer->bias
-  state->v_biases = tensor_zeros(ctx->tensor_ctx, 1, out_features);
-  if (!state->v_biases) {
-    free(state);
-    return NULL;
-  }
-
-  state->m_weights = tensor_zeros(ctx->tensor_ctx, in_features, out_features);
-  if (!state->m_weights) {
-    free(state);
-    return NULL;
-  }
-
-  state->m_biases = tensor_zeros(ctx->tensor_ctx, 1, out_features);
-  if (!state->m_biases) {
-    free(state);
-    return NULL;
-  }
-
-  state->t = 0;
-  state->beta1_correction = 1.0f;
-  state->beta2_correction = 1.0f;
-
-  return state;
-}
-
-int momentum(OptimizerState *momentum_state, float lr, Dense *layer, Tensor *dw,
-             Tensor *db) {
-  if (!momentum_state || !layer || !dw || !db) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER, momentum_state
-                                                      ? "Momentum state is NULL"
-                                                  : layer ? "Layer is NULL"
-                                                  : dw    ? "dw is NULL"
-                                                  : db    ? "db is NULL"
-                                                          : "Unknown error");
-    return CTORCH_ERROR_NULL_PARAMETER;
-  }
-
-  if (dw->rows != layer->weight->rows || dw->cols != layer->weight->cols) {
-    ctorch_set_error(CTORCH_ERROR_DIMENSION_MISMATCH, "dw shape mismatch");
-    return CTORCH_ERROR_DIMENSION_MISMATCH;
-  }
-
-  float beta = MOMENTUM_BETA;
-  float beta_t = 1.0f - beta;
-
-  size_t w_size = layer->weight->rows * layer->weight->cols;
-  for (size_t i = 0; i < w_size; i++) {
-    float g = dw->data[i];
-
-    momentum_state->v_weights->data[i] =
-        beta * momentum_state->v_weights->data[i] + beta_t * g;
-
-    layer->weight->data[i] -= lr * momentum_state->v_weights->data[i];
-  }
-
-  for (size_t i = 0; i < layer->bias->cols; i++) {
-    float g = db->data[i];
-
-    momentum_state->v_biases->data[i] =
-        beta * momentum_state->v_biases->data[i] + beta_t * g;
-
-    layer->bias->data[i] -= lr * momentum_state->v_biases->data[i];
-  }
-
-  return 0;
-}
-
-int rmsprop(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
-            Tensor *db) {
-  if (!optimizer_state || !layer || !dw || !db) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                     optimizer_state ? "Optimizer state is NULL"
-                     : layer         ? "Layer is NULL"
-                     : dw            ? "dw is NULL"
-                     : db            ? "db is NULL"
-                                     : "Unknown error");
-    return CTORCH_ERROR_NULL_PARAMETER;
-  }
-
-  if (dw->rows != layer->weight->rows || dw->cols != layer->weight->cols) {
-    ctorch_set_error(CTORCH_ERROR_DIMENSION_MISMATCH, "dw shape mismatch");
-    return CTORCH_ERROR_DIMENSION_MISMATCH;
-  }
-
-  float beta = RMSPROP_BETA;
-  float eps = EPSILON;
-
-  size_t w_size = layer->weight->rows * layer->weight->cols;
-  for (size_t i = 0; i < w_size; i++) {
-    float g = dw->data[i];
-
-    optimizer_state->v_weights->data[i] =
-        beta * optimizer_state->v_weights->data[i] + (1 - beta) * g * g;
-
-    layer->weight->data[i] -=
-        lr * g / (sqrtf(optimizer_state->v_weights->data[i]) + eps);
-  }
-
-  for (size_t i = 0; i < layer->bias->cols; i++) {
-    float g = db->data[i];
-
-    optimizer_state->v_biases->data[i] =
-        beta * optimizer_state->v_biases->data[i] + (1 - beta) * g * g;
-
-    layer->bias->data[i] -=
-        lr * g / (sqrtf(optimizer_state->v_biases->data[i]) + eps);
-  }
-
-  return 0;
-}
-
-int adam(OptimizerState *optimizer_state, float lr, Dense *layer, Tensor *dw,
-         Tensor *db) {
-  if (!optimizer_state || !layer || !dw || !db) {
-    ctorch_set_error(CTORCH_ERROR_NULL_PARAMETER,
-                     optimizer_state ? "Optimizer state is NULL"
-                     : layer         ? "Layer is NULL"
-                     : dw            ? "dw is NULL"
-                     : db            ? "db is NULL"
-                                     : "Unknown error");
-    return CTORCH_ERROR_NULL_PARAMETER;
-  }
-
-  if (dw->rows != layer->weight->rows || dw->cols != layer->weight->cols) {
-    ctorch_set_error(CTORCH_ERROR_DIMENSION_MISMATCH, "dw shape mismatch");
-    return CTORCH_ERROR_DIMENSION_MISMATCH;
-  }
-
-  optimizer_state->t++;
-
-  float beta1 = ADAM_BETA1;
-  float beta2 = ADAM_BETA2;
-  float eps = EPSILON;
-
-  optimizer_state->beta1_correction *= beta1;
-  optimizer_state->beta2_correction *= beta2;
-
-  float beta1_t = optimizer_state->beta1_correction;
-  float beta2_t = optimizer_state->beta2_correction;
-
-  size_t w_size = layer->weight->rows * layer->weight->cols;
-  for (size_t i = 0; i < w_size; i++) {
-    float g = dw->data[i];
-
-    optimizer_state->m_weights->data[i] =
-        beta1 * optimizer_state->m_weights->data[i] + (1 - beta1) * g;
-
-    optimizer_state->v_weights->data[i] =
-        beta2 * optimizer_state->v_weights->data[i] + (1 - beta2) * g * g;
-
-    float m_hat = optimizer_state->m_weights->data[i] / (1 - beta1_t);
-    float v_hat = optimizer_state->v_weights->data[i] / (1 - beta2_t);
-
-    layer->weight->data[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
-  }
-
-  for (size_t i = 0; i < layer->bias->cols; i++) {
-    float g = db->data[i];
-    optimizer_state->m_biases->data[i] =
-        beta1 * optimizer_state->m_biases->data[i] + (1 - beta1) * g;
-
-    optimizer_state->v_biases->data[i] =
-        beta2 * optimizer_state->v_biases->data[i] + (1 - beta2) * g * g;
-
-    float m_hat = optimizer_state->m_biases->data[i] / (1 - beta1_t);
-    float v_hat = optimizer_state->v_biases->data[i] / (1 - beta2_t);
-
-    layer->bias->data[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
-  }
-
-  return 0;
 }
 
 int dense_backward(DenseContext *ctx, Tensor *grad_output, float lr,
@@ -716,16 +449,19 @@ int dense_backward(DenseContext *ctx, Tensor *grad_output, float lr,
 
     switch (optimizer) {
     case Momentum:
-      momentum(ctx->optimizer_state->items[i], lr, layer, dw, db);
+      momentum(ctx->optimizer_state->items[i], lr, layer->weight, layer->bias,
+               dw, db);
       break;
     case SGD:
-      sgd(lr, layer, dw, db);
+      sgd(lr, layer->weight, layer->bias, dw, db);
       break;
     case RMSprop:
-      rmsprop(ctx->optimizer_state->items[i], lr, layer, dw, db);
+      rmsprop(ctx->optimizer_state->items[i], lr, layer->weight, layer->bias,
+              dw, db);
       break;
     case Adam:
-      adam(ctx->optimizer_state->items[i], lr, layer, dw, db);
+      adam(ctx->optimizer_state->items[i], lr, layer->weight, layer->bias, dw,
+           db);
       break;
     default:
       break;
